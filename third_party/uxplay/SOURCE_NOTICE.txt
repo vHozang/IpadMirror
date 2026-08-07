@@ -1,0 +1,11 @@
+UxPlay 1.74 is distributed with PadMirror as a separate GPLv3 process.
+
+Upstream project: https://github.com/FDH2/UxPlay
+Bundled revision: 8fa09eaec76a64726fd21becad5dcc82a4c0851c
+
+PadMirror modification: lib/mdnsd/mdnsd.c accepts UXPLAY_MDNS_IPV4 so the
+receiver can advertise on the selected physical LAN interface instead of a
+lower-metric Hyper-V or WSL adapter.
+
+The corresponding source archive is included in the release bundle. Build it
+with MSYS2 UCRT64, CMake and Ninja using -DNO_MARCH_NATIVE=ON.

@@ -1,0 +1,8 @@
+if(WIN32)
+    set(PADMIRROR_PLATFORM_WINDOWS ON)
+    add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN)
+elseif(APPLE)
+    set(PADMIRROR_PLATFORM_MACOS ON)
+elseif(UNIX)
+    set(PADMIRROR_PLATFORM_LINUX ON)
+endif()
