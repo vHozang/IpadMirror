@@ -62,14 +62,33 @@ VideoPipeline::~VideoPipeline() {
 
 bool VideoPipeline::start(
     const app::Settings& settings,
+    capture::VideoCodec codec,
     std::uintptr_t windowHandle,
     diagnostics::Metrics* metrics,
     ErrorHandler errorHandler) {
     stop();
     auto backend = platform::videoBackend();
+    if (codec == capture::VideoCodec::Hevc) {
+#ifdef Q_OS_WIN
+        backend.decoderCandidates = {
+            "d3d11h265dec",
+            "d3d11h265device1dec",
+            "nvh265dec",
+            "avdec_h265",
+        };
+#elif defined(Q_OS_MACOS)
+        backend.decoderCandidates = {"vtdec_hw", "vtdec", "avdec_h265"};
+#else
+        backend.decoderCandidates = {"vah265dec", "vaapih265dec", "avdec_h265"};
+#endif
+    }
     const auto requested = settings.hardwareDecoder().toStdString();
     if (requested != "Auto") {
-        if (requested == "D3D11") backend.decoderCandidates = {"d3d11h264dec"};
+        if (requested == "D3D11") {
+            backend.decoderCandidates = {
+                codec == capture::VideoCodec::Hevc ? "d3d11h265dec" : "d3d11h264dec"
+            };
+        }
         else if (requested == "VideoToolbox") backend.decoderCandidates = {"vtdec_hw", "vtdec"};
         else backend.decoderCandidates.insert(backend.decoderCandidates.begin(), requested);
     }
@@ -79,7 +98,9 @@ bool VideoPipeline::start(
     if (decoderName.empty() || sinkName.empty()) {
         if (errorHandler) {
             errorHandler(decoderName.empty()
-                ? "Hardware H.264 decoder is unavailable"
+                ? (codec == capture::VideoCodec::Hevc
+                    ? "HEVC decoder is unavailable"
+                    : "Hardware H.264 decoder is unavailable")
                 : "GPU video sink is unavailable");
         }
         return false;
@@ -88,7 +109,8 @@ bool VideoPipeline::start(
     auto* pipeline = gst_pipeline_new("padmirror-usb-video");
     auto* source = gst_element_factory_make("appsrc", "usb-video-source");
     auto* queue = gst_element_factory_make("queue", "live-video-queue");
-    auto* parser = gst_element_factory_make("h264parse", "h264-parser");
+    const auto* parserFactory = codec == capture::VideoCodec::Hevc ? "h265parse" : "h264parse";
+    auto* parser = gst_element_factory_make(parserFactory, "video-parser");
     auto* decoder = gst_element_factory_make(decoderName.c_str(), "hardware-video-decoder");
     auto* renderQueue = gst_element_factory_make("queue", "render-video-queue");
     auto* sink = gst_element_factory_make(sinkName.c_str(), "video-output");
@@ -99,7 +121,7 @@ bool VideoPipeline::start(
     }
 
     auto* caps = gst_caps_new_simple(
-        "video/x-h264",
+        codec == capture::VideoCodec::Hevc ? "video/x-h265" : "video/x-h264",
         "stream-format", G_TYPE_STRING, "byte-stream",
         "alignment", G_TYPE_STRING, "au",
         nullptr);
@@ -175,6 +197,7 @@ bool VideoPipeline::start(
         metrics_ = metrics;
         errorHandler_ = std::move(errorHandler);
         windowHandle_ = windowHandle;
+        codec_ = codec;
         if (windowHandle_ != 0 && GST_IS_VIDEO_OVERLAY(sink_)) {
             gst_video_overlay_set_window_handle(GST_VIDEO_OVERLAY(sink_), static_cast<guintptr>(windowHandle_));
         }

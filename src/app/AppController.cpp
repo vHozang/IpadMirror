@@ -18,9 +18,23 @@ AppController::AppController(QObject* parent)
             this, &AppController::handleCaptureState);
     connect(&captureSession_, &capture::CaptureSession::errorOccurred,
             this, &AppController::setError);
+    connect(&captureSession_, &capture::CaptureSession::statusOccurred, this, [this](const QString& message) {
+        if (active_ && settings_.connectionMode() == Settings::ConnectionMode::UsbGaming) {
+            statusText_ = message;
+            emit stateChanged();
+        }
+    });
     connect(&deviceManager_, &device::DeviceManager::devicesChanged, this, [this] {
         if (deviceManager_.hasDevice()) {
             metrics_.setDeviceName(deviceManager_.currentName());
+        }
+        if (active_ && settings_.connectionMode() == Settings::ConnectionMode::UsbGaming &&
+            deviceManager_.hasDevice() && !usbDriverInstallInProgress_ &&
+            (!RuntimeDependencies::usbCaptureDriverInstalled() || !captureSession_.running())) {
+            captureSession_.stop();
+            mediaSession_.stop();
+            startUsb();
+            return;
         }
         emit stateChanged();
     });
@@ -151,21 +165,32 @@ void AppController::beginWindowMove() {
 }
 
 void AppController::startUsb() {
+    if (RuntimeDependencies::usbCleanupRestartRequired()) {
+        active_ = false;
+        setError(QStringLiteral(
+            "UsbDk was disabled and is pending removal. Restart Windows once before using USB mode."));
+        return;
+    }
     if (!RuntimeDependencies::usbCaptureDriverInstalled()) {
         if (usbDriverInstallInProgress_) return;
         usbDriverInstallInProgress_ = true;
-        statusText_ = QStringLiteral("Installing the signed USB capture driver");
+        statusText_ = QStringLiteral("Preparing safe Apple USB support");
         emit stateChanged();
         const bool started = RuntimeDependencies::startBundledUsbDriverInstaller(this, [this](bool installed) {
             usbDriverInstallInProgress_ = false;
             if (!active_ || settings_.connectionMode() != Settings::ConnectionMode::UsbGaming) return;
             if (!installed) {
                 active_ = false;
+                if (RuntimeDependencies::usbCleanupRestartRequired()) {
+                    setError(QStringLiteral(
+                        "UsbDk was disabled and is pending removal. Restart Windows once before using USB mode."));
+                    return;
+                }
                 setError(QStringLiteral(
-                    "USB capture needs the signed UsbDk driver. Approve the Windows administrator prompt or reinstall PadMirror."));
+                    "USB needs Apple Devices and removal of unsafe UsbDk/libusb0 drivers. Approve the administrator prompt, then reconnect the iPad."));
                 return;
             }
-            statusText_ = QStringLiteral("USB capture driver installed - reconnecting iPad");
+            statusText_ = QStringLiteral("Safe Apple USB support is ready - reconnecting iPad");
             emit stateChanged();
             QTimer::singleShot(250, this, [this] {
                 if (active_ && settings_.connectionMode() == Settings::ConnectionMode::UsbGaming) startUsb();
@@ -175,7 +200,7 @@ void AppController::startUsb() {
             usbDriverInstallInProgress_ = false;
             active_ = false;
             setError(QStringLiteral(
-                "USB capture needs the signed UsbDk driver. Approve the Windows administrator prompt or reinstall PadMirror."));
+                "USB needs Apple Devices and removal of unsafe UsbDk/libusb0 drivers. Approve the administrator prompt, then reconnect the iPad."));
         }
         return;
     }
@@ -185,7 +210,15 @@ void AppController::startUsb() {
         ? deviceManager_.currentName()
         : QStringLiteral("iPad"));
     if (!mediaSession_.startUsb(
-            settings_, videoWindowHandle_, &metrics_,
+            settings_,
+#ifdef Q_OS_WIN
+            capture::VideoCodec::Hevc,
+            capture::AudioCodec::AacEld,
+#else
+            capture::VideoCodec::H264,
+            capture::AudioCodec::PcmS16Le,
+#endif
+            videoWindowHandle_, &metrics_,
             [this](const std::string& message) { publishMediaError(message); })) {
         active_ = false;
         setError(QStringLiteral("Cannot start the USB media pipeline"));

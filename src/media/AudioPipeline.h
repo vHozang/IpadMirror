@@ -34,6 +34,7 @@ public:
 
     bool start(
         const app::Settings& settings,
+        capture::AudioCodec codec,
         diagnostics::Metrics* metrics,
         ErrorHandler errorHandler);
     void stop();
@@ -59,6 +60,7 @@ private:
     bool ptsInitialized_ = false;
     bool strictSync_ = false;
     std::atomic_bool unsupportedAudioReported_{false};
+    capture::AudioCodec codec_ = capture::AudioCodec::PcmS16Le;
 };
 
 } // namespace padmirror::media

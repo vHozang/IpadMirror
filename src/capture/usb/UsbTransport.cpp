@@ -1,10 +1,141 @@
 #include "capture/usb/UsbTransport.h"
 
+#ifdef _WIN32
+
+#include <windows.h>
+#include <setupapi.h>
+
+#include <array>
+#include <cwchar>
+#include <utility>
+
+namespace padmirror::capture::usb {
+namespace {
+
+std::string utf8(const wchar_t* value) {
+    if (!value || !*value) return {};
+    const auto length = WideCharToMultiByte(CP_UTF8, 0, value, -1, nullptr, 0, nullptr, nullptr);
+    if (length <= 1) return {};
+    std::string result(static_cast<std::size_t>(length), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, value, -1, result.data(), length, nullptr, nullptr);
+    result.resize(static_cast<std::size_t>(length - 1));
+    return result;
+}
+
+bool isAppleComposite(const wchar_t* hardwareIds) {
+    static constexpr wchar_t prefix[] = L"USB\\VID_05AC&PID_12";
+    for (const auto* id = hardwareIds; id && *id; id += std::wcslen(id) + 1) {
+        if (_wcsnicmp(id, prefix, std::size(prefix) - 1) == 0 && wcsstr(id, L"&MI_") == nullptr) {
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace
+
+UsbTransport::~UsbTransport() {
+    requestStop();
+}
+
+std::vector<UsbTransport::Device> UsbTransport::enumerate(std::string& error) {
+    error.clear();
+    std::vector<Device> devices;
+    const auto deviceSet = SetupDiGetClassDevsW(nullptr, L"USB", nullptr, DIGCF_PRESENT | DIGCF_ALLCLASSES);
+    if (deviceSet == INVALID_HANDLE_VALUE) {
+        error = "Windows could not enumerate Apple USB devices";
+        return devices;
+    }
+
+    for (DWORD index = 0;; ++index) {
+        SP_DEVINFO_DATA info{};
+        info.cbSize = sizeof(info);
+        if (!SetupDiEnumDeviceInfo(deviceSet, index, &info)) break;
+
+        std::array<wchar_t, 1024> hardwareIds{};
+        DWORD type = 0;
+        if (!SetupDiGetDeviceRegistryPropertyW(
+                deviceSet,
+                &info,
+                SPDRP_HARDWAREID,
+                &type,
+                reinterpret_cast<PBYTE>(hardwareIds.data()),
+                static_cast<DWORD>(hardwareIds.size() * sizeof(wchar_t)),
+                nullptr) ||
+            !isAppleComposite(hardwareIds.data())) {
+            continue;
+        }
+
+        std::array<wchar_t, 1024> instanceId{};
+        SetupDiGetDeviceInstanceIdW(
+            deviceSet, &info, instanceId.data(), static_cast<DWORD>(instanceId.size()), nullptr);
+        std::array<wchar_t, 512> description{};
+        if (!SetupDiGetDeviceRegistryPropertyW(
+                deviceSet,
+                &info,
+                SPDRP_FRIENDLYNAME,
+                &type,
+                reinterpret_cast<PBYTE>(description.data()),
+                static_cast<DWORD>(description.size() * sizeof(wchar_t)),
+                nullptr)) {
+            SetupDiGetDeviceRegistryPropertyW(
+                deviceSet,
+                &info,
+                SPDRP_DEVICEDESC,
+                &type,
+                reinterpret_cast<PBYTE>(description.data()),
+                static_cast<DWORD>(description.size() * sizeof(wchar_t)),
+                nullptr);
+        }
+
+        Device device;
+        const auto* serial = wcsrchr(instanceId.data(), L'\\');
+        device.serial = utf8(serial ? serial + 1 : instanceId.data());
+        device.productName = utf8(description.data());
+        if (device.productName.empty()) device.productName = "iPad";
+        device.vendorId = 0x05ac;
+        devices.push_back(std::move(device));
+    }
+    SetupDiDestroyDeviceInfoList(deviceSet);
+    return devices;
+}
+
+UsbTransport::RunResult UsbTransport::run(
+    const std::string&,
+    FrameHandler,
+    ErrorHandler errorHandler,
+    std::function<bool()> shouldStop) {
+    if (shouldStop() || requestedStop_.load()) return RunResult::Stopped;
+    if (errorHandler) {
+        errorHandler("Raw libusb capture is disabled on Windows; use the safe Apple USB bridge");
+    }
+    return RunResult::Failed;
+}
+
+bool UsbTransport::write(std::span<const std::uint8_t>) {
+    return false;
+}
+
+void UsbTransport::requestStop() {
+    requestedStop_.store(true);
+}
+
+bool UsbTransport::connected() const {
+    return false;
+}
+
+void UsbTransport::closeHandle() {}
+
+} // namespace padmirror::capture::usb
+
+#else
+
 #include "capture/usb/BinaryIO.h"
 
 #include <libusb.h>
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstring>
 #include <limits>
@@ -34,15 +165,15 @@ std::string usbError(int code) {
 }
 
 int initializeUsbContext(libusb_context** context) {
-#ifdef _WIN32
-    libusb_init_option option{};
-    option.option = LIBUSB_OPTION_USE_USBDK;
-    option.value.ival = 1;
-    const auto usbDkResult = libusb_init_context(context, &option, 1);
-    if (usbDkResult == LIBUSB_SUCCESS) return usbDkResult;
-    *context = nullptr;
-#endif
     return libusb_init(context);
+}
+
+std::string normalizedSerial(std::string value) {
+    value.erase(std::remove(value.begin(), value.end(), '-'), value.end());
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char character) {
+        return static_cast<char>(std::tolower(character));
+    });
+    return value;
 }
 
 std::string readUsbString(libusb_device_handle* handle, std::uint8_t index) {
@@ -52,6 +183,14 @@ std::string readUsbString(libusb_device_handle* handle, std::uint8_t index) {
     unsigned char buffer[256]{};
     const auto size = libusb_get_string_descriptor_ascii(handle, index, buffer, sizeof(buffer));
     return size > 0 ? std::string(reinterpret_cast<char*>(buffer), static_cast<std::size_t>(size)) : std::string{};
+}
+
+int setDeviceConfiguration(libusb_device_handle* handle, int configuration) {
+    return libusb_set_configuration(handle, configuration);
+}
+
+int getDeviceConfiguration(libusb_device_handle* handle, int& configuration) {
+    return libusb_get_configuration(handle, &configuration);
 }
 
 bool configurationHasSubclass(
@@ -95,17 +234,9 @@ UsbTransport::Device describeDevice(libusb_device* device, libusb_device_handle*
         libusb_free_config_descriptor(configuration);
     }
 
-    libusb_device_handle* handle = optionalHandle;
-    bool closeWhenDone = false;
-    if (!handle && libusb_open(device, &handle) == LIBUSB_SUCCESS) {
-        closeWhenDone = true;
-    }
-    if (handle) {
-        result.serial = readUsbString(handle, descriptor.iSerialNumber);
-        result.productName = readUsbString(handle, descriptor.iProduct);
-    }
-    if (closeWhenDone) {
-        libusb_close(handle);
+    if (optionalHandle) {
+        result.serial = readUsbString(optionalHandle, descriptor.iSerialNumber);
+        result.productName = readUsbString(optionalHandle, descriptor.iProduct);
     }
     if (result.productName.empty()) {
         result.productName = "iPad / iOS device";
@@ -140,6 +271,7 @@ std::optional<OpenedDevice> openDevice(
     }
 
     std::optional<OpenedDevice> selected;
+    const auto normalizedPreferred = normalizedSerial(preferredSerial);
     for (std::remove_cv_t<decltype(count)> index = 0; index < count; ++index) {
         auto* device = devices[index];
         if (!isCaptureCandidate(device)) {
@@ -148,21 +280,12 @@ std::optional<OpenedDevice> openDevice(
         libusb_device_handle* handle = nullptr;
         const auto openResult = libusb_open(device, &handle);
         if (openResult != LIBUSB_SUCCESS) {
-#ifdef _WIN32
-            if (openResult == LIBUSB_ERROR_ACCESS) {
-                error = "Access to the iPad USB interface was denied by Windows.";
-            } else if (openResult == LIBUSB_ERROR_NOT_FOUND) {
-                error = "The UsbDk capture driver could not open the iPad. Reconnect the cable or restart Windows once.";
-            } else {
-                error = "Cannot open iPad USB interface: " + usbError(openResult);
-            }
-#else
             error = "Cannot open iPad USB interface: " + usbError(openResult);
-#endif
             continue;
         }
         auto info = describeDevice(device, handle);
-        const bool matches = preferredSerial.empty() || info.serial == preferredSerial;
+        const bool matches = normalizedPreferred.empty() || info.serial.empty() ||
+            normalizedSerial(info.serial) == normalizedPreferred;
         if (matches) {
             selected = OpenedDevice{std::move(info), handle};
             break;
@@ -289,47 +412,77 @@ UsbTransport::RunResult UsbTransport::run(
         return RunResult::Disconnected;
     }
 
-    if (opened->info.quickTimeConfiguration < 0) {
-        const auto activateResult = libusb_control_transfer(
-            opened->handle,
-            0x40,
-            0x52,
-            0,
-            2,
-            nullptr,
-            0,
-            1000);
-        if (activateResult < 0 && activateResult != LIBUSB_ERROR_NO_DEVICE) {
-            errorHandler("Cannot enable the iPad QuickTime USB configuration: " + usbError(activateResult));
-        }
+    const auto selectedSerial = opened->info.serial.empty() ? preferredSerial : opened->info.serial;
+    int currentConfiguration = -1;
+    getDeviceConfiguration(opened->handle, currentConfiguration);
+
+    // A previous interrupted session can leave the hidden configuration active.
+    // Return to usbmux before asking iOS to expose a fresh QuickTime session.
+    if (opened->info.quickTimeConfiguration >= 0 &&
+        currentConfiguration == opened->info.quickTimeConfiguration) {
+        libusb_control_transfer(opened->handle, 0x40, 0x52, 0, 0, nullptr, 0, 1000);
         libusb_close(opened->handle);
         opened.reset();
-
-        for (int attempt = 0; attempt < 20 && !shouldStop(); ++attempt) {
-            if (!waitForReconnect(shouldStop, std::chrono::milliseconds(400))) {
-                break;
-            }
+        for (int attempt = 0; attempt < 10 && !shouldStop(); ++attempt) {
+            if (!waitForReconnect(shouldStop, std::chrono::milliseconds(200))) break;
             openError.clear();
-            opened = openDevice(context_, preferredSerial, openError);
-            if (opened && opened->info.quickTimeConfiguration >= 0) {
-                break;
-            }
-            if (opened) {
-                libusb_close(opened->handle);
-                opened.reset();
-            }
+            opened = openDevice(context_, selectedSerial, openError);
+            if (opened) break;
         }
-        if (!opened || opened->info.quickTimeConfiguration < 0) {
-            errorHandler("The iPad did not reconnect with the QuickTime capture interface");
+        if (!opened) {
+            errorHandler(openError.empty() ? "The iPad did not return to its normal USB configuration" : openError);
             closeHandle();
-            return shouldStop() ? RunResult::Stopped : RunResult::Failed;
+            return shouldStop() ? RunResult::Stopped : RunResult::Disconnected;
         }
+    }
+
+    if (opened->info.usbMuxConfiguration >= 0) {
+        const auto muxResult = setDeviceConfiguration(
+            opened->handle,
+            opened->info.usbMuxConfiguration);
+        if (muxResult != LIBUSB_SUCCESS && muxResult != LIBUSB_ERROR_BUSY) {
+            errorHandler("Cannot select the iPad usbmux configuration: " + usbError(muxResult));
+        }
+    }
+
+    const auto activateResult = libusb_control_transfer(
+        opened->handle,
+        0x40,
+        0x52,
+        0,
+        2,
+        nullptr,
+        0,
+        1000);
+    if (activateResult < 0 && activateResult != LIBUSB_ERROR_NO_DEVICE) {
+        errorHandler("Cannot enable the iPad QuickTime USB configuration: " + usbError(activateResult));
+        libusb_close(opened->handle);
+        closeHandle();
+        return RunResult::Failed;
+    }
+    libusb_close(opened->handle);
+    opened.reset();
+
+    for (int attempt = 0; attempt < 25 && !shouldStop(); ++attempt) {
+        if (!waitForReconnect(shouldStop, std::chrono::milliseconds(400))) break;
+        openError.clear();
+        opened = openDevice(context_, selectedSerial, openError);
+        if (opened && opened->info.quickTimeConfiguration >= 0) break;
+        if (opened) {
+            libusb_close(opened->handle);
+            opened.reset();
+        }
+    }
+    if (!opened || opened->info.quickTimeConfiguration < 0) {
+        errorHandler("The iPad did not reconnect with the QuickTime capture interface");
+        closeHandle();
+        return shouldStop() ? RunResult::Stopped : RunResult::Failed;
     }
 
     auto* handle = opened->handle;
     const auto quickTimeConfiguration = opened->info.quickTimeConfiguration;
     usbMuxConfiguration_ = opened->info.usbMuxConfiguration;
-    const auto setConfigurationResult = libusb_set_configuration(handle, quickTimeConfiguration);
+    const auto setConfigurationResult = setDeviceConfiguration(handle, quickTimeConfiguration);
     if (setConfigurationResult != LIBUSB_SUCCESS && setConfigurationResult != LIBUSB_ERROR_BUSY) {
         errorHandler("Cannot select the QuickTime USB configuration: " + usbError(setConfigurationResult));
         libusb_close(handle);
@@ -353,8 +506,16 @@ UsbTransport::RunResult UsbTransport::run(
         closeHandle();
         return RunResult::Failed;
     }
-    if (endpoints->alternateSetting != 0) {
-        libusb_set_interface_alt_setting(handle, endpoints->interfaceNumber, endpoints->alternateSetting);
+    const auto alternateResult = libusb_set_interface_alt_setting(
+        handle,
+        endpoints->interfaceNumber,
+        endpoints->alternateSetting);
+    if (alternateResult != LIBUSB_SUCCESS) {
+        errorHandler("Cannot select the iPad QuickTime interface setting: " + usbError(alternateResult));
+        libusb_release_interface(handle, endpoints->interfaceNumber);
+        libusb_close(handle);
+        closeHandle();
+        return RunResult::Failed;
     }
     libusb_clear_halt(handle, endpoints->inputEndpoint);
     libusb_clear_halt(handle, endpoints->outputEndpoint);
@@ -437,7 +598,7 @@ UsbTransport::RunResult UsbTransport::run(
     libusb_release_interface(handle, endpoints->interfaceNumber);
     libusb_control_transfer(handle, 0x40, 0x52, 0, 0, nullptr, 0, 500);
     if (usbMuxConfiguration_ >= 0) {
-        libusb_set_configuration(handle, usbMuxConfiguration_);
+        setDeviceConfiguration(handle, usbMuxConfiguration_);
     }
     libusb_close(handle);
     libusb_exit(context_);
@@ -497,3 +658,5 @@ void UsbTransport::closeHandle() {
 }
 
 } // namespace padmirror::capture::usb
+
+#endif

@@ -9,7 +9,7 @@ add_library(padmirror_core STATIC
 target_include_directories(padmirror_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 
 if(MSVC)
-    target_compile_options(padmirror_core PRIVATE /W4 /permissive-)
+    target_compile_options(padmirror_core PRIVATE /W4 /permissive- /EHsc)
 else()
     target_compile_options(padmirror_core PRIVATE -Wall -Wextra -Wpedantic)
 endif()
@@ -60,6 +60,10 @@ endif()
 
 qt_add_executable(padmirror ${PADMIRROR_APP_SOURCES})
 
+if(MSVC)
+    target_compile_options(padmirror PRIVATE /W4 /permissive- /EHsc)
+endif()
+
 qt_add_resources(padmirror padmirror_ui
     PREFIX "/"
     BASE "${CMAKE_CURRENT_SOURCE_DIR}/.."
@@ -83,8 +87,11 @@ target_link_libraries(padmirror PRIVATE
     Qt6::QuickWidgets
     Qt6::Widgets
     PkgConfig::GSTREAMER
-    ${PADMIRROR_LIBUSB_TARGET}
 )
+
+if(PADMIRROR_LIBUSB_TARGET)
+    target_link_libraries(padmirror PRIVATE ${PADMIRROR_LIBUSB_TARGET})
+endif()
 
 if(PADMIRROR_HAVE_IMOBILEDEVICE)
     target_compile_definitions(padmirror PRIVATE PADMIRROR_HAVE_IMOBILEDEVICE=1)
@@ -92,7 +99,7 @@ if(PADMIRROR_HAVE_IMOBILEDEVICE)
 endif()
 
 if(WIN32)
-    target_link_libraries(padmirror PRIVATE user32 dwmapi advapi32)
+    target_link_libraries(padmirror PRIVATE user32 dwmapi advapi32 setupapi)
 elseif(APPLE)
     target_link_libraries(padmirror PRIVATE
         "-framework IOKit"
@@ -112,7 +119,9 @@ if(WIN32)
         app/RuntimeDependencies.cpp
     )
     target_include_directories(padmirror_runtime_check PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
-    target_link_libraries(padmirror_runtime_check PRIVATE Qt6::Core PkgConfig::GSTREAMER advapi32)
+    target_compile_options(padmirror_runtime_check PRIVATE /W4 /permissive- /EHsc)
+    target_link_libraries(padmirror_runtime_check PRIVATE
+        Qt6::Core PkgConfig::GSTREAMER advapi32 setupapi)
     set_target_properties(padmirror_runtime_check PROPERTIES
         OUTPUT_NAME "PadMirrorRuntimeCheck"
     )

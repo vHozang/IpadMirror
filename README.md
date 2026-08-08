@@ -2,8 +2,8 @@
 
 PadMirror là ứng dụng mirror màn hình iPad dành cho chơi game, bám theo `PadMirror_USB_Gaming_Architecture.md`:
 
-- USB là đường chính: QuickTime-style USB capture, H.264 hardware decode, video queue 1 frame.
-- Audio 48 kHz đi độc lập với video, buffer mặc định 10 ms và tự quay về live edge khi vượt 40 ms.
+- USB là đường chính. Trên Windows, capture đi qua Apple Mobile Device Service và RemoteXPC user-space, không dùng kernel capture driver.
+- Video USB Windows là HEVC, audio là AAC-ELD 48 kHz; pipeline giữ queue ngắn để ưu tiên độ trễ thấp.
 - Windows 10 x64 dùng D3D11 + WASAPI; macOS dùng VideoToolbox + CoreAudio.
 - Cùng một mạng Wi-Fi có thể mirror qua AirPlay bằng UxPlay chạy như một tiến trình GPLv3 riêng.
 
@@ -11,7 +11,7 @@ Không có recording, screenshot, OBS output, filter, HDR, upscale, remote contr
 
 ## Build Windows 10 x64
 
-Cần Windows 10/11 x64, PowerShell, Python 3 và kết nối Internet. Script tự tải toolchain MSVC portable, Qt, CMake/Ninja, GStreamer, libusb và Inno Setup vào phạm vi user, không cần cài Visual Studio hay vcpkg thủ công.
+Cần Windows 10/11 x64, PowerShell, Python 3 và kết nối Internet. Script tự provision MSVC portable, Qt, CMake/Ninja, GStreamer, Python 3.12 cho USB bridge và Inno Setup; không cần cài Visual Studio hay vcpkg thủ công.
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1
@@ -25,7 +25,7 @@ dist\PadMirror-portable.zip
 dist\PadMirrorSetup.exe
 ```
 
-Installer và bản portable đã kèm Qt, GStreamer, libusb, MSVC runtime và UxPlay. Khi khởi động, PadMirror kiểm tra các media component bắt buộc; nếu file runtime bị thiếu/hỏng, ứng dụng chạy `dependencies\repair-runtime.ps1`, tải bộ GStreamer chính thức, kiểm tra SHA-256 rồi cài lại tự động. USB Gaming cũng tự kiểm tra và cài driver lọc UsbDk có chữ ký Red Hat qua UAC mà không thay driver Apple.
+Installer và bản portable đã kèm Qt, GStreamer, MSVC runtime, USB bridge và UxPlay. Khi khởi động, PadMirror kiểm tra các component bắt buộc; nếu runtime media thiếu/hỏng, ứng dụng chạy `dependencies\repair-runtime.ps1`, tải bộ GStreamer chính thức, kiểm tra SHA-256 rồi sửa tự động. USB Gaming tự kiểm tra Apple Devices/Apple Mobile Device Service và có thể cài Apple Devices qua Microsoft Store bằng `winget`.
 
 Chi tiết: [docs/build.md](docs/build.md) và [docs/usb-setup.md](docs/usb-setup.md).
 
@@ -33,10 +33,11 @@ Chi tiết: [docs/build.md](docs/build.md) và [docs/usb-setup.md](docs/usb-setu
 
 1. Kết nối iPad bằng cáp có truyền dữ liệu.
 2. Mở khóa iPad và chọn **Trust This Computer** nếu được hỏi.
-3. Mở PadMirror, chọn `USB Gaming`; ứng dụng tự dò và tự reconnect.
-4. Chọn DAC/IEM, để buffer `10 ms`, `Gaming Mode` bật và `Strict sync` tắt.
+3. Bật **Developer Mode** trong `Settings -> Privacy & Security -> Developer Mode`, rồi khởi động lại iPad khi iPadOS yêu cầu.
+4. Mở PadMirror, chọn `USB Gaming`; ứng dụng tự chuẩn bị Developer Disk Image và tự reconnect.
+5. Chọn DAC/IEM, để buffer `10 ms`, `Gaming Mode` bật và `Strict sync` tắt.
 
-Windows cần UsbDk để `libusb` truy cập iPad song song với driver Apple. PadMirror tự kiểm tra và mở bộ cài đã xác minh chữ ký/SHA-256 trong lần chạy USB đầu tiên.
+Không cài UsbDk, Zadig hoặc `libusb-win32/libusb0` cho iPad. PadMirror dùng driver Apple chính chủ; nếu phát hiện các driver/filter cũ có thể gây `WDF_VIOLATION`, ứng dụng sẽ yêu cầu quyền quản trị để gỡ và yêu cầu restart Windows một lần.
 
 ## Chạy cùng Wi-Fi
 

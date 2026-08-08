@@ -72,6 +72,7 @@ AudioPipeline::~AudioPipeline() {
 
 bool AudioPipeline::start(
     const app::Settings& settings,
+    capture::AudioCodec codec,
     diagnostics::Metrics* metrics,
     ErrorHandler errorHandler) {
     stop();
@@ -79,24 +80,50 @@ bool AudioPipeline::start(
     auto* sink = createSelectedAudioSink(settings.audioDevice(), actualDevice);
     auto* pipeline = gst_pipeline_new("padmirror-usb-audio");
     auto* source = gst_element_factory_make("appsrc", "usb-audio-source");
+    auto* decoder = codec == capture::AudioCodec::AacEld
+        ? gst_element_factory_make("avdec_aac", "aac-eld-decoder")
+        : nullptr;
     auto* convert = gst_element_factory_make("audioconvert", "audio-convert");
     auto* resample = gst_element_factory_make("audioresample", "audio-resample");
     auto* capsFilter = gst_element_factory_make("capsfilter", "audio-48khz");
     auto* queue = gst_element_factory_make("queue", "live-audio-queue");
-    if (!pipeline || !source || !convert || !resample || !capsFilter || !queue || !sink) {
+    if (!pipeline || !source || !convert || !resample || !capsFilter || !queue || !sink ||
+        (codec == capture::AudioCodec::AacEld && !decoder)) {
         if (pipeline) gst_object_unref(pipeline);
         if (errorHandler) errorHandler("Cannot create the GStreamer audio pipeline");
         return false;
     }
 
-    auto* inputCaps = gst_caps_new_simple(
+    GstCaps* inputCaps = nullptr;
+    if (codec == capture::AudioCodec::AacEld) {
+        static constexpr std::uint8_t config[] = {0xF8, 0xE6, 0x40, 0x00};
+        auto* codecData = gst_buffer_new_allocate(nullptr, sizeof(config), nullptr);
+        gst_buffer_fill(codecData, 0, config, sizeof(config));
+        inputCaps = gst_caps_new_simple(
+            "audio/mpeg",
+            "mpegversion", G_TYPE_INT, 4,
+            "stream-format", G_TYPE_STRING, "raw",
+            "rate", G_TYPE_INT, 48000,
+            "channels", G_TYPE_INT, 2,
+            "codec_data", GST_TYPE_BUFFER, codecData,
+            nullptr);
+        gst_buffer_unref(codecData);
+    } else {
+        inputCaps = gst_caps_new_simple(
+            "audio/x-raw",
+            "format", G_TYPE_STRING, "S16LE",
+            "layout", G_TYPE_STRING, "interleaved",
+            "rate", G_TYPE_INT, 48000,
+            "channels", G_TYPE_INT, 2,
+            nullptr);
+    }
+    auto* outputCaps = gst_caps_new_simple(
         "audio/x-raw",
         "format", G_TYPE_STRING, "S16LE",
         "layout", G_TYPE_STRING, "interleaved",
         "rate", G_TYPE_INT, 48000,
         "channels", G_TYPE_INT, 2,
         nullptr);
-    auto* outputCaps = gst_caps_copy(inputCaps);
     g_object_set(
         source,
         "is-live", TRUE,
@@ -130,15 +157,24 @@ bool AudioPipeline::start(
     setBooleanIfPresent(sink, "low-latency", safeMode ? FALSE : TRUE);
     setBooleanIfPresent(sink, "exclusive", exclusive ? TRUE : FALSE);
 
-    gst_bin_add_many(GST_BIN(pipeline), source, convert, resample, capsFilter, queue, sink, nullptr);
-    if (!gst_element_link_many(source, convert, resample, capsFilter, queue, sink, nullptr)) {
+    if (decoder) {
+        gst_bin_add_many(GST_BIN(pipeline), source, decoder, convert, resample, capsFilter, queue, sink, nullptr);
+    } else {
+        gst_bin_add_many(GST_BIN(pipeline), source, convert, resample, capsFilter, queue, sink, nullptr);
+    }
+    const bool linked = decoder
+        ? gst_element_link_many(source, decoder, convert, resample, capsFilter, queue, sink, nullptr)
+        : gst_element_link_many(source, convert, resample, capsFilter, queue, sink, nullptr);
+    if (!linked) {
         gst_object_unref(pipeline);
         if (errorHandler) errorHandler("Cannot link the low-latency audio pipeline");
         return false;
     }
 
-    ringBuffer_ = std::make_unique<AudioRingBuffer>(
-        48000, 2, 2, static_cast<double>(settings.audioBufferMs()), 40.0);
+    if (codec == capture::AudioCodec::PcmS16Le) {
+        ringBuffer_ = std::make_unique<AudioRingBuffer>(
+            48000, 2, 2, static_cast<double>(settings.audioBufferMs()), 40.0);
+    }
     {
         std::lock_guard lock(mutex_);
         pipeline_ = pipeline;
@@ -148,6 +184,7 @@ bool AudioPipeline::start(
         nextPtsNs_ = 0;
         ptsInitialized_ = false;
         unsupportedAudioReported_.store(false);
+        codec_ = codec;
     }
     if (metrics) metrics->setAudioBackend(actualDevice);
 
@@ -156,7 +193,9 @@ bool AudioPipeline::start(
         return false;
     }
     stopRequested_.store(false);
-    feederThread_ = std::thread([this] { feed(); });
+    if (codec == capture::AudioCodec::PcmS16Le) {
+        feederThread_ = std::thread([this] { feed(); });
+    }
     busThread_ = std::thread([this] { monitorBus(); });
     return true;
 }
@@ -180,7 +219,7 @@ void AudioPipeline::stop() {
 }
 
 bool AudioPipeline::push(capture::AudioPacket packet) {
-    if (packet.format.codec != capture::AudioCodec::PcmS16Le || packet.data.empty()) {
+    if (packet.data.empty() || packet.format.codec != codec_) {
         bool expected = false;
         if (unsupportedAudioReported_.compare_exchange_strong(expected, true)) {
             ErrorHandler handler;
@@ -188,12 +227,22 @@ bool AudioPipeline::push(capture::AudioPacket packet) {
                 std::lock_guard lock(mutex_);
                 handler = errorHandler_;
             }
-            if (handler) handler("The iPad audio format is not supported PCM S16LE");
+            if (handler) handler("The iPad audio format does not match the active USB pipeline");
         }
         return false;
     }
 
     std::lock_guard lock(mutex_);
+    if (codec_ == capture::AudioCodec::AacEld) {
+        if (!appSource_) return false;
+        auto* buffer = gst_buffer_new_allocate(nullptr, packet.data.size(), nullptr);
+        if (!buffer) return false;
+        gst_buffer_fill(buffer, 0, packet.data.data(), packet.data.size());
+        GST_BUFFER_PTS(buffer) = packet.ptsNs == 0 ? GST_CLOCK_TIME_NONE : packet.ptsNs;
+        GST_BUFFER_DURATION(buffer) = 10 * GST_MSECOND;
+        const auto flow = gst_app_src_push_buffer(GST_APP_SRC(appSource_), buffer);
+        return flow == GST_FLOW_OK;
+    }
     if (!ringBuffer_) return false;
     if (!ptsInitialized_ && packet.ptsNs != 0) {
         nextPtsNs_ = packet.ptsNs;

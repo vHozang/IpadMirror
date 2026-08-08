@@ -1,12 +1,12 @@
 param(
     [string]$ToolsRoot = "D:\PadMirrorTools",
     [string]$QtVersion = "6.8.3",
-    [string]$GStreamerVersion = "1.28.5",
-    [string]$LibusbVersion = "1.0.30"
+    [string]$GStreamerVersion = "1.28.5"
 )
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+$global:LASTEXITCODE = 0
 
 function Download-File([string]$Uri, [string]$Destination) {
     if (-not (Test-Path $Destination)) {
@@ -88,22 +88,6 @@ if (-not (Test-Path (Join-Path $gstreamerRoot "lib\pkgconfig\gstreamer-1.0.pc"))
     if ($process.ExitCode -ne 0) { throw "GStreamer installation failed with exit $($process.ExitCode)" }
 }
 
-$libusbRoot = Join-Path $ToolsRoot "libusb-$LibusbVersion"
-if (-not (Test-Path (Join-Path $libusbRoot "VS2022\MS64\dll\libusb-1.0.dll"))) {
-    if ($LibusbVersion -ne "1.0.30") {
-        throw "Update the pinned libusb checksum before using version $LibusbVersion"
-    }
-    $libusbArchive = Join-Path $downloads "libusb-$LibusbVersion.7z"
-    Download-File "https://github.com/libusb/libusb/releases/download/v$LibusbVersion/libusb-$LibusbVersion.7z" $libusbArchive
-    Assert-Sha256 $libusbArchive "7fb1dfec805b97983763d7d0ae244320da12add1003d4249c96cc4d586398c79"
-
-    $sevenZip = Join-Path $ToolsRoot "7zr.exe"
-    Download-File "https://www.7-zip.org/a/7zr.exe" $sevenZip
-    Assert-Sha256 $sevenZip "ef323796edb615d8928378d21e88b26ace9915c0a2e7206e584e4302a93cfbcf"
-    & $sevenZip x -y "-o$libusbRoot" $libusbArchive
-    if ($LASTEXITCODE -ne 0) { throw "libusb extraction failed" }
-}
-
 if (-not (Find-InnoCompiler)) {
     $winget = (Get-Command winget.exe -ErrorAction Stop).Source
     & $winget install --id JRSoftware.InnoSetup --exact --source winget --scope user --silent `
@@ -114,14 +98,11 @@ if (-not (Find-InnoCompiler)) {
 $env:QTDIR = $qtRoot
 $env:GSTREAMER_ROOT_X86_64 = $gstreamerRoot
 $env:PADMIRROR_MSVC_ROOT = $portableMsvcRoot
-$env:PADMIRROR_LIBUSB_ROOT = $libusbRoot
 [Environment]::SetEnvironmentVariable("QTDIR", $qtRoot, "User")
 [Environment]::SetEnvironmentVariable("GSTREAMER_ROOT_X86_64", $gstreamerRoot, "User")
 [Environment]::SetEnvironmentVariable("PADMIRROR_MSVC_ROOT", $portableMsvcRoot, "User")
-[Environment]::SetEnvironmentVariable("PADMIRROR_LIBUSB_ROOT", $libusbRoot, "User")
 
 Write-Host "Build dependencies are ready."
 Write-Host "QTDIR=$qtRoot"
 Write-Host "GSTREAMER_ROOT_X86_64=$gstreamerRoot"
 Write-Host "PADMIRROR_MSVC_ROOT=$portableMsvcRoot"
-Write-Host "PADMIRROR_LIBUSB_ROOT=$libusbRoot"

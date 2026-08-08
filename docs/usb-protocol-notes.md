@@ -1,5 +1,7 @@
 # QuickTime USB protocol notes
 
+Backend này chỉ dùng cho nền tảng non-Windows/legacy và các bài test protocol. Bản Windows dùng Apple Mobile Device Service + RemoteXPC user-space để tránh kernel capture driver và `WDF_VIOLATION`.
+
 File này ghi lại đúng phần protocol đang được triển khai, không cố mô tả các dịch vụ iOS khác.
 
 ## Kích hoạt transport

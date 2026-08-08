@@ -2,7 +2,6 @@ param(
     [string]$QtRoot = $env:QTDIR,
     [string]$GStreamerRoot = $env:GSTREAMER_ROOT_X86_64,
     [string]$PortableMsvcRoot = $env:PADMIRROR_MSVC_ROOT,
-    [string]$LibusbRoot = $env:PADMIRROR_LIBUSB_ROOT,
     [string]$ToolsRoot = "D:\PadMirrorTools",
     [string]$GStreamerVersion = "1.28.5",
     [string]$UxPlayRoot,
@@ -13,6 +12,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+$global:LASTEXITCODE = 0
 
 function Require-Path([string]$Path, [string]$Label) {
     if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path $Path)) {
@@ -31,15 +31,26 @@ function First-ExistingPath([string[]]$Candidates) {
 
 function Import-BatchEnvironment([string]$BatchFile) {
     Require-Path $BatchFile "MSVC environment script"
-    $command = "call `"$BatchFile`" >nul && set"
-    $lines = & cmd.exe /d /c $command
-    if ($LASTEXITCODE -ne 0) { throw "Could not initialize the portable MSVC environment" }
-    foreach ($line in $lines) {
-        $separator = $line.IndexOf('=')
-        if ($separator -le 0) { continue }
-        $name = $line.Substring(0, $separator)
-        $value = $line.Substring($separator + 1)
-        [Environment]::SetEnvironmentVariable($name, $value, "Process")
+    $wrapper = Join-Path $env:TEMP ("padmirror-msvc-env-{0}.cmd" -f [Guid]::NewGuid().ToString("N"))
+    try {
+        [IO.File]::WriteAllLines($wrapper, @(
+            "@echo off",
+            "call `"$BatchFile`" >nul",
+            "if errorlevel 1 exit /b %errorlevel%",
+            "set"
+        ), [Text.Encoding]::ASCII)
+        $global:LASTEXITCODE = 0
+        $lines = & cmd.exe /d /c $wrapper
+        if (-not $? -or $LASTEXITCODE -ne 0) { throw "Could not initialize the portable MSVC environment" }
+        foreach ($line in $lines) {
+            $separator = $line.IndexOf('=')
+            if ($separator -le 0) { continue }
+            $name = $line.Substring(0, $separator)
+            $value = $line.Substring($separator + 1)
+            [Environment]::SetEnvironmentVariable($name, $value, "Process")
+        }
+    } finally {
+        Remove-Item $wrapper -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -87,18 +98,13 @@ if ([string]::IsNullOrWhiteSpace($GStreamerRoot)) {
 if ([string]::IsNullOrWhiteSpace($PortableMsvcRoot)) {
     $PortableMsvcRoot = First-ExistingPath @((Join-Path $ToolsRoot "msvc"))
 }
-if ([string]::IsNullOrWhiteSpace($LibusbRoot)) {
-    $LibusbRoot = First-ExistingPath @((Join-Path $ToolsRoot "libusb-1.0.30"))
-}
-
 Require-Path $QtRoot "Qt MSVC root"
 Require-Path $GStreamerRoot "GStreamer MSVC root"
 Require-Path $PortableMsvcRoot "portable MSVC root"
-Require-Path $LibusbRoot "libusb root"
 Require-Path (Join-Path $QtRoot "bin\windeployqt.exe") "windeployqt"
-Require-Path (Join-Path $LibusbRoot "VS2022\MS64\dll\libusb-1.0.dll") "libusb runtime"
 
 Import-BatchEnvironment (Join-Path $PortableMsvcRoot "setup_x64.bat")
+$compilerDir = Split-Path -Parent (Get-Command cl.exe -ErrorAction Stop).Source
 $toolScripts = Join-Path $ToolsRoot "aqt\Scripts"
 $cmake = Join-Path $toolScripts "cmake.exe"
 $ctest = Join-Path $toolScripts "ctest.exe"
@@ -108,7 +114,7 @@ Require-Path $ctest "CTest"
 Require-Path $ninja "Ninja"
 
 $gstreamerBin = Join-Path $GStreamerRoot "bin"
-$env:PATH = "$toolScripts;$gstreamerBin;$env:PATH"
+$env:PATH = "$compilerDir;$toolScripts;$gstreamerBin;$env:PATH"
 $env:PKG_CONFIG_PATH = @(
     (Join-Path $GStreamerRoot "lib\pkgconfig"),
     (Join-Path $GStreamerRoot "share\pkgconfig")
@@ -124,7 +130,6 @@ $configureArgs = @(
     "-DCMAKE_C_COMPILER=cl.exe",
     "-DCMAKE_CXX_COMPILER=cl.exe",
     "-DCMAKE_PREFIX_PATH=$QtRoot",
-    "-DPADMIRROR_LIBUSB_ROOT=$LibusbRoot",
     "-DPADMIRROR_ENABLE_IMOBILEDEVICE=$imobile",
     "-DPADMIRROR_BUILD_TESTS=ON"
 )
@@ -134,6 +139,20 @@ if ($LASTEXITCODE -ne 0) { throw "CMake configure failed" }
 
 & $cmake --build $buildDir --parallel
 if ($LASTEXITCODE -ne 0) { throw "CMake build failed" }
+
+$msvcRuntimeDlls = @(
+    "msvcp140.dll",
+    "msvcp140_1.dll",
+    "msvcp140_2.dll",
+    "vcruntime140.dll",
+    "vcruntime140_1.dll"
+)
+$testBinaryDir = Join-Path $buildDir "tests"
+foreach ($runtimeDll in $msvcRuntimeDlls) {
+    $runtimePath = Join-Path $compilerDir $runtimeDll
+    Require-Path $runtimePath "MSVC runtime $runtimeDll"
+    Copy-Item $runtimePath $testBinaryDir -Force
+}
 
 & $ctest --test-dir $buildDir --output-on-failure
 if ($LASTEXITCODE -ne 0) { throw "Tests failed" }
@@ -154,14 +173,7 @@ Copy-Item $builtRuntimeChecker $runtimeChecker -Force
     --release --no-translations --verbose 0 --qmldir (Join-Path $repoRoot "ui") $exe
 if ($LASTEXITCODE -ne 0) { throw "windeployqt failed" }
 
-$compilerDir = Split-Path -Parent (Get-Command cl.exe -ErrorAction Stop).Source
-foreach ($runtimeDll in @(
-    "msvcp140.dll",
-    "msvcp140_1.dll",
-    "msvcp140_2.dll",
-    "vcruntime140.dll",
-    "vcruntime140_1.dll"
-)) {
+foreach ($runtimeDll in $msvcRuntimeDlls) {
     $runtimePath = Join-Path $compilerDir $runtimeDll
     Require-Path $runtimePath "MSVC runtime $runtimeDll"
     Copy-Item $runtimePath $releaseDir -Force
@@ -182,6 +194,8 @@ $requiredPlugins = @(
     "gstrtpmanager.dll",
     "gstrtp.dll",
     "gstd3d11.dll",
+    "gstnvcodec.dll",
+    "gstlibav.dll",
     "gstwasapi2.dll",
     "gstwasapi.dll"
 )
@@ -198,32 +212,22 @@ if (Test-Path $scannerSource) {
     Copy-Item $scannerSource $scannerTarget -Force
 }
 
-$libusbDll = Join-Path $LibusbRoot "VS2022\MS64\dll\libusb-1.0.dll"
-Copy-Item $libusbDll $releaseDir -Force
-
 $dependenciesDir = Join-Path $releaseDir "dependencies"
 New-Item -ItemType Directory -Force -Path $dependenciesDir | Out-Null
 Copy-Item (Join-Path $PSScriptRoot "repair-runtime.ps1") $dependenciesDir -Force
 Copy-Item (Join-Path $PSScriptRoot "configure-wifi-firewall.ps1") $dependenciesDir -Force
 Copy-Item (Join-Path $PSScriptRoot "install-usb-capture-driver.ps1") $dependenciesDir -Force
+Copy-Item (Join-Path $PSScriptRoot "remove-unsafe-usb-filter.ps1") $dependenciesDir -Force
+
+$usbBridgeDir = Join-Path $releaseDir "usb-bridge"
+& (Join-Path $PSScriptRoot "build-usb-bridge.ps1") `
+    -ToolsRoot $ToolsRoot -OutputDir $usbBridgeDir
+if ($LASTEXITCODE -ne 0) { throw "Safe USB bridge build failed" }
 
 New-Item -ItemType Directory -Force -Path $downloadDir | Out-Null
 $vcRedist = Join-Path $downloadDir "VC_redist.x64.exe"
 Download-MicrosoftSigned "https://aka.ms/vs/17/release/vc_redist.x64.exe" $vcRedist
 Copy-Item $vcRedist $dependenciesDir -Force
-
-$usbDkInstaller = Join-Path $downloadDir "UsbDk_1.0.22_x64.msi"
-Require-Path $usbDkInstaller "UsbDk 1.0.22 x64 installer"
-$usbDkHash = (Get-FileHash $usbDkInstaller -Algorithm SHA256).Hash
-if ($usbDkHash -ne "91F6F695E1E13C656024E6D3B55620BF08D8835EF05EE0496935BA6BB62466A5") {
-    throw "UsbDk installer checksum verification failed"
-}
-$usbDkSignature = Get-AuthenticodeSignature $usbDkInstaller
-if ($usbDkSignature.Status -ne "Valid" -or
-    $usbDkSignature.SignerCertificate.Subject -notmatch "Red Hat") {
-    throw "UsbDk installer signature verification failed"
-}
-Copy-Item $usbDkInstaller $dependenciesDir -Force
 
 if ([string]::IsNullOrWhiteSpace($UxPlayRoot)) {
     $UxPlayRoot = First-ExistingPath @(
@@ -243,10 +247,6 @@ Copy-Item $UxPlayRoot $uxplayTarget -Recurse -Force
 $licenseTarget = Join-Path $releaseDir "licenses\PadMirror"
 New-Item -ItemType Directory -Force -Path $licenseTarget | Out-Null
 Copy-Item (Join-Path $repoRoot "LICENSES\THIRD_PARTY.md") $licenseTarget -Force
-$usbDkLicenseTarget = Join-Path $releaseDir "licenses\UsbDk"
-New-Item -ItemType Directory -Force -Path $usbDkLicenseTarget | Out-Null
-Copy-Item (Join-Path $repoRoot "LICENSES\UsbDk-Apache-2.0.txt") $usbDkLicenseTarget -Force
-
 $runtimeReport = Join-Path $env:TEMP "padmirror-runtime-check.txt"
 if (Test-Path $runtimeReport) { Remove-Item $runtimeReport -Force }
 $runtimeCheck = Start-Process -FilePath $runtimeChecker `
@@ -258,7 +258,7 @@ if ($runtimeCheckExitCode -ne 0 -or -not (Test-Path $runtimeReport)) {
 }
 
 New-Item -ItemType Directory -Force -Path $distDir | Out-Null
-$portableDir = Join-Path $distDir "PadMirror-portable"
+$portableDir = Join-Path $buildDir "portable-package"
 if (Test-Path $portableDir) { Remove-Item $portableDir -Recurse -Force }
 Copy-Item $releaseDir $portableDir -Recurse -Force
 $portableZip = Join-Path $distDir "PadMirror-portable.zip"

@@ -30,6 +30,7 @@ public:
 
     bool start(
         const app::Settings& settings,
+        capture::VideoCodec codec,
         std::uintptr_t windowHandle,
         diagnostics::Metrics* metrics,
         ErrorHandler errorHandler);
@@ -50,6 +51,7 @@ private:
     std::thread busThread_;
     std::atomic_bool busStopRequested_{false};
     std::uintptr_t windowHandle_ = 0;
+    capture::VideoCodec codec_ = capture::VideoCodec::H264;
 };
 
 } // namespace padmirror::media

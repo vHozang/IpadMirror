@@ -9,12 +9,16 @@
 #include <QProcess>
 #include <QStandardPaths>
 
+#include <cwchar>
+#include <cstdint>
 #include <initializer_list>
 #include <memory>
 #include <utility>
+#include <vector>
 
 #ifdef Q_OS_WIN
 #include <windows.h>
+#include <setupapi.h>
 #include <winsvc.h>
 #endif
 
@@ -45,6 +49,111 @@ bool hasAnyFactory(std::initializer_list<const char*> names) {
 void requireFactory(QStringList& missing, const char* label, std::initializer_list<const char*> names) {
     if (!hasAnyFactory(names)) missing.push_back(QString::fromLatin1(label));
 }
+
+#ifdef Q_OS_WIN
+std::vector<wchar_t> deviceProperty(
+    HDEVINFO deviceSet,
+    SP_DEVINFO_DATA& device,
+    DWORD property) {
+    DWORD requiredBytes = 0;
+    DWORD type = 0;
+    SetupDiGetDeviceRegistryPropertyW(deviceSet, &device, property, &type, nullptr, 0, &requiredBytes);
+    if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || requiredBytes == 0) return {};
+    std::vector<wchar_t> value((requiredBytes / sizeof(wchar_t)) + 1, L'\0');
+    if (!SetupDiGetDeviceRegistryPropertyW(
+            deviceSet,
+            &device,
+            property,
+            &type,
+            reinterpret_cast<PBYTE>(value.data()),
+            requiredBytes,
+            nullptr)) {
+        return {};
+    }
+    return value;
+}
+
+bool multiStringContains(const std::vector<wchar_t>& values, const wchar_t* expected) {
+    if (values.empty()) return false;
+    for (const wchar_t* value = values.data(); value && *value; value += std::wcslen(value) + 1) {
+        if (_wcsicmp(value, expected) == 0) return true;
+    }
+    return false;
+}
+
+bool isAppleMobileComposite(
+    const std::vector<wchar_t>& hardwareIds,
+    const std::vector<wchar_t>& service) {
+    if (!multiStringContains(service, L"usbccgp")) return false;
+    for (const wchar_t* id = hardwareIds.data(); id && *id; id += std::wcslen(id) + 1) {
+        const QString normalized = QString::fromWCharArray(id).toUpper();
+        if (normalized.startsWith(QStringLiteral("USB\\VID_05AC&PID_12")) &&
+            !normalized.contains(QStringLiteral("&MI_"))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool appleUsbHasUnsafeFilter() {
+    const auto deviceSet = SetupDiGetClassDevsW(nullptr, L"USB", nullptr, DIGCF_ALLCLASSES);
+    if (deviceSet == INVALID_HANDLE_VALUE) return false;
+
+    for (DWORD index = 0;; ++index) {
+        SP_DEVINFO_DATA device{};
+        device.cbSize = sizeof(device);
+        if (!SetupDiEnumDeviceInfo(deviceSet, index, &device)) break;
+        const auto hardwareIds = deviceProperty(deviceSet, device, SPDRP_HARDWAREID);
+        const auto service = deviceProperty(deviceSet, device, SPDRP_SERVICE);
+        if (hardwareIds.empty() || !isAppleMobileComposite(hardwareIds, service)) continue;
+        if (multiStringContains(deviceProperty(deviceSet, device, SPDRP_UPPERFILTERS), L"libusb0") ||
+            multiStringContains(deviceProperty(deviceSet, device, SPDRP_LOWERFILTERS), L"libusb0")) {
+            SetupDiDestroyDeviceInfoList(deviceSet);
+            return true;
+        }
+    }
+    SetupDiDestroyDeviceInfoList(deviceSet);
+    return false;
+}
+
+bool serviceRunning(SC_HANDLE manager, const wchar_t* name) {
+    const auto service = OpenServiceW(manager, name, SERVICE_QUERY_STATUS);
+    if (!service) return false;
+    SERVICE_STATUS_PROCESS status{};
+    DWORD bytesNeeded = 0;
+    const bool running = QueryServiceStatusEx(
+        service,
+        SC_STATUS_PROCESS_INFO,
+        reinterpret_cast<LPBYTE>(&status),
+        sizeof(status),
+        &bytesNeeded) && status.dwCurrentState == SERVICE_RUNNING;
+    CloseServiceHandle(service);
+    return running;
+}
+
+bool serviceExists(SC_HANDLE manager, const wchar_t* name) {
+    const auto service = OpenServiceW(manager, name, SERVICE_QUERY_STATUS);
+    if (!service) return false;
+    CloseServiceHandle(service);
+    return true;
+}
+
+bool serviceDisabled(SC_HANDLE manager, const wchar_t* name) {
+    const auto service = OpenServiceW(manager, name, SERVICE_QUERY_CONFIG);
+    if (!service) return false;
+    DWORD requiredBytes = 0;
+    QueryServiceConfigW(service, nullptr, 0, &requiredBytes);
+    std::vector<std::uint8_t> buffer(requiredBytes);
+    const auto* config = reinterpret_cast<QUERY_SERVICE_CONFIGW*>(buffer.data());
+    const bool disabled = requiredBytes != 0 && QueryServiceConfigW(
+        service,
+        reinterpret_cast<QUERY_SERVICE_CONFIGW*>(buffer.data()),
+        requiredBytes,
+        &requiredBytes) && config->dwStartType == SERVICE_DISABLED;
+    CloseServiceHandle(service);
+    return disabled;
+}
+#endif
 
 } // namespace
 
@@ -112,6 +221,11 @@ QStringList RuntimeDependencies::missingComponents() {
     }
 
 #ifdef Q_OS_WIN
+    const QDir applicationDir(QCoreApplication::applicationDirPath());
+    if (!QFileInfo::exists(
+            applicationDir.filePath(QStringLiteral("usb-bridge/PadMirrorUsbBridge.exe")))) {
+        missing.push_back(QStringLiteral("safe Apple USB bridge"));
+    }
     const auto bundledPlugins = QDir(QCoreApplication::applicationDirPath())
         .filePath(QStringLiteral("gstreamer-1.0"));
     if (QFileInfo::exists(bundledPlugins)) {
@@ -123,6 +237,7 @@ QStringList RuntimeDependencies::missingComponents() {
     requireFactory(missing, "GStreamer appsrc", {"appsrc"});
     requireFactory(missing, "GStreamer queue", {"queue"});
     requireFactory(missing, "GStreamer H.264 parser", {"h264parse"});
+    requireFactory(missing, "GStreamer H.265 parser", {"h265parse"});
     requireFactory(missing, "GStreamer audio converter", {"audioconvert"});
     requireFactory(missing, "GStreamer audio resampler", {"audioresample"});
     requireFactory(missing, "GStreamer UDP source", {"udpsrc"});
@@ -132,6 +247,9 @@ QStringList RuntimeDependencies::missingComponents() {
 
 #ifdef Q_OS_WIN
     requireFactory(missing, "D3D11 H.264 hardware decoder", {"d3d11h264dec"});
+    requireFactory(missing, "HEVC decoder", {
+        "d3d11h265dec", "d3d11h265device1dec", "nvh265dec", "avdec_h265"});
+    requireFactory(missing, "AAC-ELD decoder", {"avdec_aac"});
     requireFactory(missing, "D3D11 video sink", {"d3d11videosink"});
     requireFactory(missing, "WASAPI audio sink", {"wasapi2sink", "wasapisink"});
 #elif defined(Q_OS_MACOS)
@@ -167,14 +285,33 @@ bool RuntimeDependencies::runBundledRepair() {
 
 bool RuntimeDependencies::usbCaptureDriverInstalled() {
 #ifdef Q_OS_WIN
+    if (appleUsbHasUnsafeFilter()) return false;
+
+    const auto bridge = QDir(QCoreApplication::applicationDirPath())
+        .filePath(QStringLiteral("usb-bridge/PadMirrorUsbBridge.exe"));
+    if (!QFileInfo::exists(bridge)) return false;
+
     const auto manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
     if (!manager) return false;
-    const auto service = OpenServiceW(manager, L"UsbDk", SERVICE_QUERY_STATUS);
-    if (service) CloseServiceHandle(service);
+    const bool unsafeDriverPresent = serviceExists(manager, L"UsbDk");
+    const bool ready = !unsafeDriverPresent &&
+        serviceRunning(manager, L"Apple Mobile Device Service");
     CloseServiceHandle(manager);
-    return service != nullptr;
+    return ready;
 #else
     return true;
+#endif
+}
+
+bool RuntimeDependencies::usbCleanupRestartRequired() {
+#ifdef Q_OS_WIN
+    const auto manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (!manager) return false;
+    const bool restartRequired = serviceDisabled(manager, L"UsbDk");
+    CloseServiceHandle(manager);
+    return restartRequired;
+#else
+    return false;
 #endif
 }
 

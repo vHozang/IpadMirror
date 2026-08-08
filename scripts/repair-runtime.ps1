@@ -23,6 +23,8 @@ function Start-ElevatedInstaller([string]$Path, [string[]]$Arguments) {
 }
 
 $dependencyRoot = $PSScriptRoot
+$applicationRoot = Split-Path -Parent $dependencyRoot
+
 $vcRedist = Join-Path $dependencyRoot "VC_redist.x64.exe"
 if (-not (Test-VcRuntime)) {
     Start-ElevatedInstaller $vcRedist @("/install", "/quiet", "/norestart")
@@ -69,14 +71,14 @@ if ($ForceGStreamer -or -not $gstreamerReady) {
     if ($process.ExitCode -ne 0) { throw "GStreamer installer failed with exit $($process.ExitCode)" }
 
     $installedRoot = Join-Path $env:LOCALAPPDATA "Programs\gstreamer\1.0\msvc_x86_64"
-    $applicationRoot = Split-Path -Parent $dependencyRoot
     Copy-Item (Join-Path $installedRoot "bin\*.dll") $applicationRoot -Force
     $pluginTarget = Join-Path $applicationRoot "gstreamer-1.0"
     New-Item -ItemType Directory -Force -Path $pluginTarget | Out-Null
     foreach ($plugin in @(
         "gstapp.dll", "gstcoreelements.dll", "gstvideoparsersbad.dll",
         "gstaudioconvert.dll", "gstaudioresample.dll", "gstudp.dll",
-        "gstrtpmanager.dll", "gstrtp.dll", "gstd3d11.dll",
+        "gstrtpmanager.dll", "gstrtp.dll", "gstd3d11.dll", "gstnvcodec.dll",
+        "gstlibav.dll",
         "gstwasapi2.dll", "gstwasapi.dll"
     )) {
         Copy-Item (Join-Path $installedRoot "lib\gstreamer-1.0\$plugin") $pluginTarget -Force

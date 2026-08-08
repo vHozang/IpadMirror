@@ -8,5 +8,7 @@ out/
 .vscode/
 CMakeUserPresets.json
 *.user
+__pycache__/
+*.py[cod]
 *.log
 logs/

@@ -23,12 +23,14 @@ MediaSession::~MediaSession() {
 
 bool MediaSession::startUsb(
     const app::Settings& settings,
+    capture::VideoCodec videoCodec,
+    capture::AudioCodec audioCodec,
     std::uintptr_t windowHandle,
     diagnostics::Metrics* metrics,
     ErrorHandler errorHandler) {
     stop();
-    if (!videoPipeline_.start(settings, windowHandle, metrics, errorHandler)) return false;
-    if (!audioPipeline_.start(settings, metrics, errorHandler)) {
+    if (!videoPipeline_.start(settings, videoCodec, windowHandle, metrics, errorHandler)) return false;
+    if (!audioPipeline_.start(settings, audioCodec, metrics, errorHandler)) {
         videoPipeline_.stop();
         return false;
     }

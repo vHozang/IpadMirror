@@ -37,11 +37,11 @@ void validateReferenceFixtures(const std::filesystem::path& root) {
     assert(protocol.processFrame(std::span(cwpaRequest).subspan(4)));
     assert(writes.size() == 4);
     assert(writes[0] == readFixture(root / "asyn-hpd1"));
-    assert(writes[1] == readFixture(root / "asyn-hpd1"));
-    assert(writes[2].size() == 28);
-    assert(readLe<std::uint32_t>(writes[2], 4) == 0x72706c79);
-    assert(readLe<std::uint64_t>(writes[2], 8) == readLe<std::uint64_t>(cwpaRequest, 20));
-    assert(readLe<std::uint64_t>(writes[2], 20) == readLe<std::uint64_t>(cwpaRequest, 28) + 1000);
+    assert(writes[1].size() == 28);
+    assert(readLe<std::uint32_t>(writes[1], 4) == 0x72706c79);
+    assert(readLe<std::uint64_t>(writes[1], 8) == readLe<std::uint64_t>(cwpaRequest, 20));
+    assert(readLe<std::uint64_t>(writes[1], 20) == readLe<std::uint64_t>(cwpaRequest, 28) + 1000);
+    assert(writes[2] == readFixture(root / "asyn-hpd1"));
     const auto hpaFixture = readFixture(root / "asyn-hpa1");
     assert(writes[3].size() == hpaFixture.size());
     assert(readLe<std::uint32_t>(writes[3], 4) == 0x6173796e);
@@ -97,6 +97,27 @@ int main() {
     assert(readLe<std::uint64_t>(written, 8) == 0x1234);
     const auto skew = std::bit_cast<double>(readLe<std::uint64_t>(written, 20));
     assert(std::abs(skew - 48000.0) < 0.001);
+
+    std::vector<std::vector<std::uint8_t>> handshakeWrites;
+    protocol.setWriter([&handshakeWrites](std::span<const std::uint8_t> bytes) {
+        handshakeWrites.emplace_back(bytes.begin(), bytes.end());
+        return true;
+    });
+    std::vector<std::uint8_t> cwpaRequest;
+    appendLe(cwpaRequest, std::uint32_t{0x73796e63});
+    appendLe(cwpaRequest, std::uint64_t{1});
+    appendLe(cwpaRequest, std::uint32_t{0x63777061});
+    appendLe(cwpaRequest, std::uint64_t{0x1234});
+    appendLe(cwpaRequest, std::uint64_t{0x5678});
+    assert(protocol.processFrame(cwpaRequest));
+    assert(handshakeWrites.size() == 4);
+    assert(readLe<std::uint32_t>(handshakeWrites[0], 4) == 0x6173796e);
+    assert(readLe<std::uint32_t>(handshakeWrites[0], 16) == 0x68706431);
+    assert(readLe<std::uint32_t>(handshakeWrites[1], 4) == 0x72706c79);
+    assert(readLe<std::uint32_t>(handshakeWrites[2], 4) == 0x6173796e);
+    assert(readLe<std::uint32_t>(handshakeWrites[2], 16) == 0x68706431);
+    assert(readLe<std::uint32_t>(handshakeWrites[3], 4) == 0x6173796e);
+    assert(readLe<std::uint32_t>(handshakeWrites[3], 16) == 0x68706131);
 
     if (const auto* fixtures = std::getenv("PADMIRROR_IOSCREEN_FIXTURES")) {
         validateReferenceFixtures(fixtures);

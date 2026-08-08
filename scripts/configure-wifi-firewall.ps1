@@ -10,6 +10,7 @@ $ruleNames = @(
     "PadMirror-UxPlay-UDP",
     "PadMirror-UxPlay-TCP"
 )
+$firewallRegistry = "HKLM:\SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\FirewallRules"
 
 function Test-Administrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -17,16 +18,37 @@ function Test-Administrator {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+function Get-ProgramRuleProperties {
+    $properties = (Get-ItemProperty $firewallRegistry -ErrorAction SilentlyContinue).PSObject.Properties
+    $programToken = ("App=$UxPlayPath").ToLowerInvariant()
+    return @($properties | Where-Object {
+        $_.Name -notlike "PS*" -and
+        $_.Value.ToString().ToLowerInvariant().Contains($programToken) -and
+        $_.Value -match "Dir=In"
+    })
+}
+
 function Test-CurrentRules {
-    foreach ($name in $ruleNames) {
-        $rule = Get-NetFirewallRule -Name $name -ErrorAction SilentlyContinue
-        if ($null -eq $rule -or $rule.Enabled -ne "True" -or $rule.Action -ne "Allow") {
-            return $false
+    $programRules = Get-ProgramRuleProperties
+    if ($programRules | Where-Object { $_.Value -match "Action=Block" }) {
+        return $false
+    }
+
+    $expected = @(
+        @{ DisplayName = "PadMirror UxPlay mDNS"; Protocol = "Protocol=17"; Port = "LPort=5353" },
+        @{ DisplayName = "PadMirror UxPlay AirPlay UDP"; Protocol = "Protocol=17"; Port = "7100-7102" },
+        @{ DisplayName = "PadMirror UxPlay AirPlay TCP"; Protocol = "Protocol=6"; Port = "7100-7102" }
+    )
+    foreach ($item in $expected) {
+        $matched = $programRules | Where-Object {
+            $_.Value -match "Action=Allow" -and
+            $_.Value -match "Active=TRUE" -and
+            $_.Value -match "Dir=In" -and
+            $_.Value -like "*Name=$($item.DisplayName)|*" -and
+            $_.Value -like "*$($item.Protocol)*" -and
+            $_.Value -like "*$($item.Port)*"
         }
-        $application = $rule | Get-NetFirewallApplicationFilter
-        if ($application.Program -ne $UxPlayPath) {
-            return $false
-        }
+        if (-not $matched) { return $false }
     }
     return $true
 }
@@ -54,17 +76,33 @@ if (-not (Test-Administrator)) {
 }
 
 foreach ($name in $ruleNames) {
-    Remove-NetFirewallRule -Name $name -ErrorAction SilentlyContinue
+    Remove-NetFirewallRule -PolicyStore PersistentStore -Name $name -ErrorAction SilentlyContinue
 }
 
-New-NetFirewallRule -Name $ruleNames[0] -DisplayName "PadMirror UxPlay mDNS" `
+# A previous Windows firewall prompt may have created a Public-profile block
+# rule. Explicit block rules override PadMirror's allow rules, so remove every
+# old inbound rule for this bundled UxPlay path before recreating scoped rules.
+& netsh.exe advfirewall firewall delete rule name=all dir=in "program=$UxPlayPath" | Out-Null
+foreach ($property in Get-ProgramRuleProperties) {
+    Remove-NetFirewallRule -PolicyStore PersistentStore -Name $property.Name -ErrorAction SilentlyContinue
+}
+foreach ($property in Get-ProgramRuleProperties) {
+    Remove-ItemProperty -Path $firewallRegistry -Name $property.Name -ErrorAction Stop
+}
+
+New-NetFirewallRule -PolicyStore PersistentStore -Name $ruleNames[0] -DisplayName "PadMirror UxPlay mDNS" `
     -Direction Inbound -Action Allow -Enabled True -Profile Any `
     -Program $UxPlayPath -Protocol UDP -LocalPort 5353 | Out-Null
-New-NetFirewallRule -Name $ruleNames[1] -DisplayName "PadMirror UxPlay AirPlay UDP" `
+New-NetFirewallRule -PolicyStore PersistentStore -Name $ruleNames[1] -DisplayName "PadMirror UxPlay AirPlay UDP" `
     -Direction Inbound -Action Allow -Enabled True -Profile Any `
     -Program $UxPlayPath -Protocol UDP -LocalPort 7100-7102 | Out-Null
-New-NetFirewallRule -Name $ruleNames[2] -DisplayName "PadMirror UxPlay AirPlay TCP" `
+New-NetFirewallRule -PolicyStore PersistentStore -Name $ruleNames[2] -DisplayName "PadMirror UxPlay AirPlay TCP" `
     -Direction Inbound -Action Allow -Enabled True -Profile Any `
     -Program $UxPlayPath -Protocol TCP -LocalPort 7100-7102 | Out-Null
+
+Start-Sleep -Milliseconds 300
+if (-not (Test-CurrentRules)) {
+    throw "Windows Firewall did not keep the PadMirror AirPlay allow rules."
+}
 
 Write-Output "PadMirror AirPlay firewall rules are ready."

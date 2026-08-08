@@ -6,7 +6,7 @@
 #endif
 
 #define AppName "PadMirror"
-#define AppVersion "0.1.3"
+#define AppVersion "0.1.6"
 
 [Setup]
 AppId={{475CC31D-376B-4C26-A4C1-23DF219178EE}
@@ -36,6 +36,14 @@ Name: "desktopicon"; Description: "Tao bieu tuong tren Desktop"; GroupDescriptio
 
 [Files]
 Source: "{#ReleaseDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+[InstallDelete]
+Type: files; Name: "{app}\libusb0.dll"
+Type: files; Name: "{app}\libusb-1.0.dll"
+Type: filesandordirs; Name: "{app}\dependencies\libusb-win32"
+Type: filesandordirs; Name: "{app}\dependencies\libusb"
+Type: filesandordirs; Name: "{app}\licenses\libusb-win32"
+Type: filesandordirs; Name: "{app}\licenses\UsbDk"
 
 [Icons]
 Name: "{autoprograms}\PadMirror"; Filename: "{app}\PadMirror.exe"

@@ -1,42 +1,48 @@
 # Thiết lập USB
 
-## Driver USB trên Windows
+## Windows 10/11 x64
 
-1. Cài Apple Devices hoặc iTunes chính thức.
-2. Kết nối iPad, mở khóa và hoàn tất **Trust This Computer**.
-3. Kiểm tra cáp có truyền dữ liệu, không chỉ sạc.
-4. Giữ nguyên driver Apple trong Device Manager.
+PadMirror chỉ dùng stack USB chính chủ của Apple: Apple Devices, Apple Mobile Device Service, pairing/trust và RemoteXPC user-space. Bản Windows không mở iPad bằng raw `libusb` và không cần kernel capture driver.
 
-PadMirror dùng `libusb` với backend UsbDk để gửi control request bật QuickTime configuration và claim interface capture. UsbDk là filter driver có chữ ký Red Hat, hoạt động cùng driver Apple thay vì thay thế driver composite của iPad.
+1. Cài **Apple Devices** từ Microsoft Store.
+2. Cắm iPad bằng cáp data, mở khóa và chọn **Trust This Computer**.
+3. Trên iPad, bật `Settings -> Privacy & Security -> Developer Mode`, restart iPad và xác nhận bật Developer Mode.
+4. Giữ `Apple Mobile Device USB Composite Device` dùng driver Apple mặc định.
+5. Mở PadMirror và chọn `USB Gaming`.
 
-Trong lần chạy USB đầu tiên, ứng dụng:
+Lần chạy đầu, PadMirror kiểm tra Apple Mobile Device Service và USB bridge đi kèm. Nếu Apple Devices còn thiếu, app dùng `winget` để mở luồng cài chính chủ. Bridge tự tải/mount Developer Disk Image phù hợp với iPadOS khi bắt đầu capture.
 
-- Kiểm tra service `UsbDk`.
-- Xác minh SHA-256 và chữ ký Red Hat của MSI đi kèm.
-- Mở UAC và cài UsbDk nếu còn thiếu.
-- Giữ giao diện PadMirror hoạt động trong lúc chờ UAC.
+## Bảo vệ khỏi WDF_VIOLATION
 
-Không dùng Zadig để thay driver `Apple Mobile Device USB Composite Device`. Thao tác đó có thể làm Apple Devices, iTunes, pairing và Apple Mobile Device Service ngừng nhận iPad.
+Không cài UsbDk, Zadig hoặc `libusb-win32/libusb0` lên iPad. Các filter/driver này không còn được PadMirror sử dụng và có thể gây `WDF_VIOLATION` trên một số máy Windows.
 
-Không có một lựa chọn Zadig duy nhất an toàn cho mọi máy. Hãy thử trên đúng máy/iPad mục tiêu và giữ khả năng rollback.
+Nếu phát hiện bản cũ, PadMirror chạy `dependencies\remove-unsafe-usb-filter.ps1` qua UAC để:
+
+- Vô hiệu hóa và gỡ UsbDk.
+- Gỡ filter `libusb0` khỏi thiết bị Apple mà không thay driver Apple.
+- Yêu cầu restart Windows một lần nếu driver cũ đang nằm trong kernel.
+
+Không thử lại USB trước khi hoàn tất lần restart đó.
 
 ## Trình tự chạy
 
 1. Cắm iPad trực tiếp vào máy, tránh hub trong lần thử đầu.
-2. Mở khóa iPad.
-3. Chạy PadMirror và chọn `USB Gaming`.
-4. Theo dõi Diagnostics và log:
-   - Windows: `%LOCALAPPDATA%\PadMirror\PadMirror\logs\padmirror.log`
-   - macOS: thư mục AppLocalData của PadMirror, file `logs/padmirror.log`.
-5. Nếu rút cáp, ứng dụng chuyển sang reconnect và tự kết nối lại khi iPad xuất hiện.
+2. Mở khóa iPad; đóng 3uAirPlayer hoặc app mirror khác.
+3. Chọn `USB Gaming` trong PadMirror.
+4. Chờ trạng thái `Preparing Apple's Developer Disk Image`, rồi `USB Gaming Mode active`.
+5. Nếu rút cáp, cắm lại và mở khóa iPad để app kết nối lại.
+
+Log Windows: `%LOCALAPPDATA%\PadMirror\PadMirror\logs\padmirror.log`.
 
 ## Lỗi thường gặp
 
-| Thông báo | Kiểm tra |
+| Thông báo | Cách xử lý |
 | --- | --- |
-| No iPad was found on USB | Cáp data, cổng USB, iPad đã mở khóa, driver có nhìn thấy thiết bị |
-| Access was denied | UsbDk chưa được cài, UAC bị hủy hoặc cần restart Windows một lần |
-| Cannot claim QuickTime interface | Rút/cắm lại cáp sau khi cài UsbDk, rồi thử restart Windows |
-| iPad did not reconnect with QuickTime interface | Đổi cáp/cổng, chờ iPad reconnect, đóng phần mềm Apple đang truy cập thiết bị |
-| Hardware H.264 decoder is unavailable | Cài đúng GStreamer MSVC plugin và cập nhật driver GPU |
+| No iPad was found through Apple Devices | Đổi cáp/cổng, mở khóa iPad, kiểm tra Apple Devices có nhìn thấy máy |
+| Trust This Computer | Chọn Trust trên iPad, nhập passcode rồi rút/cắm lại cáp |
+| Enable Developer Mode | Bật Developer Mode, restart iPad và xác nhận sau khi máy lên |
+| Developer Disk Image setup failed | Kiểm tra Internet, ngày giờ Windows và thử lại |
+| Apple DisplayService is unavailable | Xác nhận Developer Mode đã bật, rút/cắm lại iPad |
+| UsbDk was disabled and is pending removal | Restart Windows một lần rồi mở lại PadMirror |
+| HEVC decoder is unavailable | Cập nhật driver GPU hoặc chạy lại installer để repair GStreamer |
 | Audio device unavailable | Chọn lại DAC, rút/cắm DAC rồi restart receiver |

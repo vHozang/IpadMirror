@@ -313,8 +313,9 @@ bool QuickTimeProtocol::processSync(std::span<const std::uint8_t> frame) {
         audioClockRunning_ = true;
         const auto localClockRef = deviceAudioClockRef_ + 1000;
         const auto display = makeHpd1Packet();
-        return send(display) && send(display) &&
+        return send(display) &&
             send(makeClockReply(correlation, localClockRef)) &&
+            send(display) &&
             send(makeHpa1Packet(deviceAudioClockRef_));
     }
     case kCvrp: {

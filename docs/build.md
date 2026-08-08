@@ -8,7 +8,7 @@
 - Python 3 trong `PATH`.
 - Internet trong lần provision đầu tiên.
 
-`scripts\install-build-dependencies.ps1` tự provision MSVC 2022 portable, Qt 6.8.3, CMake/Ninja, GStreamer MSVC 1.28.5, libusb 1.0.30 và Inno Setup dưới `D:\PadMirrorTools`/`LocalAppData`. Không trộn Qt/GStreamer MinGW vào binary MSVC của PadMirror. UxPlay dùng bản MSYS2 UCRT64 vì chạy ở tiến trình riêng.
+`scripts\install-build-dependencies.ps1` tự provision MSVC 2022 portable, Qt 6.8.3, CMake/Ninja, GStreamer MSVC 1.28.5 và Inno Setup dưới `D:\PadMirrorTools`/`LocalAppData`. `build-usb-bridge.ps1` dùng Python bootstrap để provision Python 3.12, `pymobiledevice3` và PyInstaller cho bridge user-space. Không trộn Qt/GStreamer MinGW vào binary MSVC của PadMirror. UxPlay dùng bản MSYS2 UCRT64 vì chạy ở tiến trình riêng.
 
 ### Kiểm tra GStreamer
 
@@ -16,11 +16,13 @@
 $env:PATH = "C:\gstreamer\1.0\msvc_x86_64\bin;$env:PATH"
 
 gst-inspect-1.0 d3d11h264dec
+gst-inspect-1.0 d3d11h265dec
+gst-inspect-1.0 avdec_aac
 gst-inspect-1.0 d3d11videosink
 gst-inspect-1.0 wasapi2sink
 ```
 
-Ba element trên cần xuất hiện. `wasapisink` được dùng làm fallback nếu máy không có `wasapi2sink`.
+H.264 phục vụ AirPlay; H.265/AAC phục vụ USB Windows. HEVC có thêm fallback NVIDIA/libav và `wasapisink` được dùng khi máy không có `wasapi2sink`.
 
 ### Build tự động
 
@@ -32,12 +34,11 @@ Kết quả:
 
 ```text
 build\windows-x64\stage\PadMirror.exe
-dist\PadMirror-portable\PadMirror.exe
 dist\PadMirror-portable.zip
 dist\PadMirrorSetup.exe
 ```
 
-Script chạy toàn bộ test, `windeployqt`, đóng gói runtime và gọi `PadMirrorRuntimeCheck.exe`. Build dừng ngay nếu thiếu H.264 parser/depayloader, D3D11 decoder/sink hoặc WASAPI sink.
+Script chạy toàn bộ test, build/probe USB bridge, `windeployqt`, đóng gói runtime và gọi `PadMirrorRuntimeCheck.exe`. Build dừng nếu thiếu H.264/H.265 parser, HEVC/AAC decoder, D3D11 sink hoặc WASAPI sink.
 
 UxPlay được lấy từ `-UxPlayRoot`, sau đó từ `D:\PadMirrorTools\uxplay-bundle` hoặc `third_party\uxplay-windows`. Bundle phát hành phải có `uxplay.exe`, DLL/plugin GStreamer MinGW, GPLv3 và source archive tương ứng.
 
@@ -54,11 +55,12 @@ Script ghim đúng revision UxPlay 1.74, áp dụng `third_party/uxplay/PadMirro
 - Installer kiểm tra registry của Microsoft Visual C++ x64 Runtime và chạy `dependencies\VC_redist.x64.exe` nếu thiếu.
 - Bản portable có sẵn các DLL MSVC cần thiết nên vẫn khởi động được trước khi VC Redistributable được cài hệ thống.
 - Ứng dụng kiểm tra GStreamer khi khởi động. Nếu package thiếu/hỏng, `repair-runtime.ps1` tải installer chính thức, xác minh SHA-256, cài theo user rồi chép lại các DLL/plugin bắt buộc.
-- USB Gaming tự kiểm tra UsbDk. Nếu thiếu, ứng dụng chạy bộ cài Red Hat đã được kiểm tra chữ ký và SHA-256 qua cửa sổ UAC, không thay driver Apple.
+- USB Gaming tự kiểm tra Apple Devices, Apple Mobile Device Service và bridge user-space đi kèm. App có thể cài Apple Devices chính chủ qua Microsoft Store/winget.
+- Nếu phát hiện UsbDk hoặc filter `libusb0` từ bản cũ, app chỉ gỡ chúng qua UAC và yêu cầu restart; bản mới không cài hay sử dụng các driver đó.
 - AirPlay Wi-Fi tự tạo rule Windows Firewall cho UxPlay và bind mDNS vào card LAN vật lý đang dùng.
 - UxPlay 1.74 và source GPLv3 được đóng gói dưới `uxplay\`; ứng dụng tự phát hiện đường dẫn này.
 
-`libimobiledevice` mặc định tắt trong script Windows để đường build chính ít phụ thuộc. Nếu đã có bộ thư viện MSVC/pkg-config tương thích, dùng:
+`libimobiledevice` native mặc định tắt trong script Windows vì USB bridge đã đóng gói phần Apple user-space cần thiết. Nếu đã có bộ thư viện MSVC/pkg-config tương thích, dùng:
 
 ```powershell
 .\scripts\build-windows.ps1 -EnableIMobileDevice
@@ -74,7 +76,6 @@ cmake -S . -B build\windows-x64 `
   -G Ninja `
   -DCMAKE_BUILD_TYPE=Release `
   -DCMAKE_PREFIX_PATH="$env:QTDIR" `
-  -DPADMIRROR_LIBUSB_ROOT="$env:PADMIRROR_LIBUSB_ROOT" `
   -DPADMIRROR_ENABLE_IMOBILEDEVICE=OFF
 
 cmake --build build\windows-x64 --parallel

@@ -37,6 +37,8 @@ public:
 
     bool startUsb(
         const app::Settings& settings,
+        capture::VideoCodec videoCodec,
+        capture::AudioCodec audioCodec,
         std::uintptr_t windowHandle,
         diagnostics::Metrics* metrics,
         ErrorHandler errorHandler);

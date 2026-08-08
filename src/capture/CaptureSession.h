@@ -1,13 +1,16 @@
 #pragma once
 
-#include "capture/usb/QuickTimeProtocol.h"
-#include "capture/usb/UsbTransport.h"
-
+#include <QByteArray>
 #include <QObject>
+#include <QProcess>
 #include <QString>
 
 #include <atomic>
+#ifndef _WIN32
+#include "capture/usb/QuickTimeProtocol.h"
+#include "capture/usb/UsbTransport.h"
 #include <thread>
+#endif
 
 namespace padmirror::media {
 class MediaSession;
@@ -39,16 +42,32 @@ public:
 signals:
     void stateChanged(padmirror::capture::CaptureSession::State state);
     void errorOccurred(const QString& message);
+    void statusOccurred(const QString& message);
 
 private:
     void publishState(State state);
     void publishError(const std::string& message);
+#ifdef _WIN32
+    void consumeBridgeOutput();
+    void consumeBridgeErrors();
+    void handleBridgeLine(const QByteArray& line);
+    [[nodiscard]] QString bridgeProgram() const;
+#else
     bool waitBackoff() const;
+#endif
 
     media::MediaSession* mediaSession_ = nullptr;
+#ifdef _WIN32
+    QProcess bridgeProcess_;
+    QByteArray bridgeOutput_;
+    QByteArray bridgeErrors_;
+    QString selectedSerial_;
+    bool bridgeFatalError_ = false;
+#else
     usb::UsbTransport transport_;
     usb::QuickTimeProtocol protocol_;
     std::thread worker_;
+#endif
     std::atomic_bool stopRequested_{false};
     std::atomic_bool running_{false};
 };

@@ -6,7 +6,13 @@
 
 namespace padmirror::capture {
 
+enum class VideoCodec {
+    H264,
+    Hevc,
+};
+
 struct VideoFormat {
+    VideoCodec codec = VideoCodec::H264;
     std::uint32_t width = 0;
     std::uint32_t height = 0;
     std::vector<std::uint8_t> sps;
@@ -22,6 +28,7 @@ struct VideoPacket {
 
 enum class AudioCodec {
     PcmS16Le,
+    AacEld,
     Unknown,
 };
 

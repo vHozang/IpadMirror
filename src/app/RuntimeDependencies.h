@@ -14,6 +14,7 @@ public:
     [[nodiscard]] static QStringList missingComponents();
     [[nodiscard]] static bool runBundledRepair();
     [[nodiscard]] static bool usbCaptureDriverInstalled();
+    [[nodiscard]] static bool usbCleanupRestartRequired();
     [[nodiscard]] static bool startBundledUsbDriverInstaller(
         QObject* context,
         std::function<void(bool)> completion);

@@ -6,28 +6,30 @@ PadMirror giữ đúng mục tiêu V1: USB trước, latency thấp, 60 FPS ổn
 
 ```text
 iPad
-  -> libusb / QuickTime hidden USB configuration
-  -> QuickTimeProtocol
-  -> PacketParser
-     -> H.264 Annex B -> GStreamer -> hardware decoder -> GPU sink
-     -> PCM S16LE    -> 40 ms hard-cap ring buffer -> audio sink
+  -> Apple Mobile Device Service / trust
+  -> RemoteXPC user-space tunnel
+  -> Apple DisplayService
+     -> HEVC RTP    -> PadMirrorUsbBridge.exe -> GStreamer -> GPU sink
+     -> AAC-ELD RTP -> PadMirrorUsbBridge.exe -> GStreamer -> WASAPI
 ```
 
-- `UsbTransport` bật control request `0x40/0x52`, tìm interface subclass `0x2A`, claim bulk endpoints và tự reconnect.
-- `QuickTimeProtocol` xử lý `PING`, `SYNC`, `ASYN`, `FEED`, `EAT!`, `NEED`, `RELS` và shutdown có kiểm soát.
-- `PacketParser` đọc CoreMedia sample buffer, CMTime, H.264 AVCC/SPS/PPS và PCM.
+- Windows chạy `PadMirrorUsbBridge.exe` ở tiến trình riêng qua `QProcess`; media frame đi về app bằng stdout nhị phân có giới hạn kích thước.
+- Bridge dùng Apple pairing, Developer Mode, Developer Disk Image và `UserspaceRsdTunnel`; không cài hoặc gọi UsbDk/libusb0.
+- HEVC dùng D3D11/NVIDIA khi có, fallback `avdec_h265`; AAC-ELD được giải mã bằng `avdec_aac`.
 - Video dùng hai queue 1 frame, `leaky=downstream`, render frame mới nhất.
-- Audio mặc định prime ở 10 ms; khi tổng backlog vượt 40 ms, dữ liệu cũ bị bỏ để quay về live edge.
 - Audio không bị giữ lại chỉ để khớp video trong Gaming Mode.
+
+Backend QuickTime/libusb cũ (`QuickTimeProtocol` + `PacketParser`, H.264/PCM) chỉ còn cho nền tảng non-Windows và kiểm thử protocol; binary Windows không link hay mở raw USB.
 
 ## Backend nền tảng
 
 | Nền tảng | Video | Audio |
 | --- | --- | --- |
-| Windows 10 x64 | `d3d11h264dec` -> `d3d11videosink` | `wasapi2sink`, fallback `wasapisink` |
+| Windows USB | `d3d11h265dec`, fallback NVIDIA/libav -> `d3d11videosink` | `avdec_aac` -> `wasapi2sink`, fallback `wasapisink` |
+| Windows Wi-Fi | `d3d11h264dec` -> `d3d11videosink` | L16/PCM -> WASAPI |
 | macOS | `vtdec_hw`, fallback `vtdec` | `osxaudiosink` |
 
-`libimobiledevice` là tùy chọn để đọc tên, UDID và trạng thái trust. Capture data vẫn đi trực tiếp qua `libusb`; GUI không gọi USB/GStreamer trực tiếp.
+GUI không gọi Apple USB API hoặc GStreamer trực tiếp. `CaptureSession` quản lý bridge; `MediaSession` quản lý pipeline decode/render/audio.
 
 ## AirPlay cùng Wi-Fi
 
@@ -43,7 +45,7 @@ UxPlay không được nhúng hoặc link vào PadMirror. Ranh giới tiến tr�
 ## Thread model
 
 - Qt/QML chỉ chạy trên UI thread.
-- USB read và protocol dispatch chạy trên worker thread.
+- Apple USB/RemoteXPC chạy trong tiến trình bridge riêng; Qt đọc stdout/stderr bất đồng bộ.
 - Decode/render/audio scheduling do GStreamer quản lý.
 - Device scan chạy nền; cập nhật UI được đưa về Qt event loop.
 - Metrics dùng counter nhỏ, thread-safe và refresh UI mỗi 250 ms.

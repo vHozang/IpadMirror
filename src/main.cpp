@@ -17,7 +17,7 @@ int main(int argc, char* argv[]) {
     QApplication application(argc, argv);
     QCoreApplication::setOrganizationName(QStringLiteral("PadMirror"));
     QCoreApplication::setApplicationName(QStringLiteral("PadMirror"));
-    QCoreApplication::setApplicationVersion(QStringLiteral("0.1.3"));
+    QCoreApplication::setApplicationVersion(QStringLiteral("0.1.6"));
     QQuickStyle::setStyle(QStringLiteral("Basic"));
     padmirror::app::installLogging();
     padmirror::app::RuntimeDependencies::configureEnvironment();
