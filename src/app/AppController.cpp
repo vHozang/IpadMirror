@@ -24,6 +24,21 @@ AppController::AppController(QObject* parent)
             emit stateChanged();
         }
     });
+    connect(&captureSession_, &capture::CaptureSession::wifiFallbackRequested, this,
+        [this](const QString& message) {
+            QTimer::singleShot(0, this, [this, message] {
+                if (!active_ || settings_.connectionMode() != Settings::ConnectionMode::UsbGaming) return;
+                if (!wifiAvailable()) {
+                    active_ = false;
+                    setError(message + QStringLiteral(" UxPlay is unavailable."));
+                    return;
+                }
+                qWarning().noquote() << message;
+                statusText_ = message;
+                emit stateChanged();
+                settings_.setConnectionMode(Settings::ConnectionMode::AirPlayWifi);
+            });
+        });
     connect(&deviceManager_, &device::DeviceManager::devicesChanged, this, [this] {
         if (deviceManager_.hasDevice()) {
             metrics_.setDeviceName(deviceManager_.currentName());
@@ -252,6 +267,7 @@ void AppController::startWifi() {
 }
 
 void AppController::handleCaptureState(capture::CaptureSession::State state) {
+    if (settings_.connectionMode() != Settings::ConnectionMode::UsbGaming) return;
     switch (state) {
     case capture::CaptureSession::State::Disconnected:
         streaming_ = false;

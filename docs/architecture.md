@@ -15,6 +15,7 @@ iPad
 
 - Windows chạy `PadMirrorUsbBridge.exe` ở tiến trình riêng qua `QProcess`; media frame đi về app bằng stdout nhị phân có giới hạn kích thước.
 - Bridge dùng Apple pairing, Developer Mode, Developer Disk Image và `UserspaceRsdTunnel`; không cài hoặc gọi UsbDk/libusb0.
+- `DisplayService` USB video bị Apple giới hạn ở iPadOS 27+. Trên iPadOS 26, controller chuyển có kiểm soát sang AirPlay Wi-Fi.
 - HEVC dùng D3D11/NVIDIA khi có, fallback `avdec_h265`; AAC-ELD được giải mã bằng `avdec_aac`.
 - Video dùng hai queue 1 frame, `leaky=downstream`, render frame mới nhất.
 - Audio không bị giữ lại chỉ để khớp video trong Gaming Mode.

@@ -144,8 +144,11 @@ $msvcRuntimeDlls = @(
     "msvcp140.dll",
     "msvcp140_1.dll",
     "msvcp140_2.dll",
+    "msvcp140_atomic_wait.dll",
+    "msvcp140_codecvt_ids.dll",
     "vcruntime140.dll",
-    "vcruntime140_1.dll"
+    "vcruntime140_1.dll",
+    "vcruntime140_threads.dll"
 )
 $testBinaryDir = Join-Path $buildDir "tests"
 foreach ($runtimeDll in $msvcRuntimeDlls) {
@@ -210,6 +213,9 @@ if (Test-Path $scannerSource) {
     $scannerTarget = Join-Path $releaseDir "libexec\gstreamer-1.0"
     New-Item -ItemType Directory -Force -Path $scannerTarget | Out-Null
     Copy-Item $scannerSource $scannerTarget -Force
+    foreach ($runtimeDll in $msvcRuntimeDlls) {
+        Copy-Item (Join-Path $compilerDir $runtimeDll) $scannerTarget -Force
+    }
 }
 
 $dependenciesDir = Join-Path $releaseDir "dependencies"
@@ -248,10 +254,17 @@ $licenseTarget = Join-Path $releaseDir "licenses\PadMirror"
 New-Item -ItemType Directory -Force -Path $licenseTarget | Out-Null
 Copy-Item (Join-Path $repoRoot "LICENSES\THIRD_PARTY.md") $licenseTarget -Force
 $runtimeReport = Join-Path $env:TEMP "padmirror-runtime-check.txt"
+$runtimeRegistry = Join-Path $env:TEMP ("padmirror-runtime-registry-{0}.bin" -f [Guid]::NewGuid().ToString("N"))
 if (Test-Path $runtimeReport) { Remove-Item $runtimeReport -Force }
-$runtimeCheck = Start-Process -FilePath $runtimeChecker `
-    -ArgumentList @("--report=$runtimeReport") -Wait -PassThru -NoNewWindow
-$runtimeCheckExitCode = $runtimeCheck.ExitCode
+$env:PADMIRROR_GST_REGISTRY = $runtimeRegistry
+try {
+    $runtimeCheck = Start-Process -FilePath $runtimeChecker `
+        -ArgumentList @("--report=$runtimeReport") -Wait -PassThru -NoNewWindow
+    $runtimeCheckExitCode = $runtimeCheck.ExitCode
+} finally {
+    Remove-Item Env:PADMIRROR_GST_REGISTRY -ErrorAction SilentlyContinue
+    Remove-Item $runtimeRegistry -Force -ErrorAction SilentlyContinue
+}
 if ($runtimeCheckExitCode -ne 0 -or -not (Test-Path $runtimeReport)) {
     $details = if (Test-Path $runtimeReport) { Get-Content $runtimeReport -Raw } else { "No report was produced." }
     throw "Packaged runtime check failed:`n$details"

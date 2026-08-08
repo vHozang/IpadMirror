@@ -27,6 +27,13 @@ def emit_status(event: str, message: str, **details: Any) -> None:
     print("PADMIRROR " + json.dumps(payload, separators=(",", ":")), file=sys.stderr, flush=True)
 
 
+def product_major_version(version: str) -> int | None:
+    try:
+        return int(version.split(".", 1)[0])
+    except (TypeError, ValueError):
+        return None
+
+
 class BridgeError(RuntimeError):
     def __init__(self, code: str, message: str, exit_code: int = 1) -> None:
         super().__init__(message)
@@ -228,6 +235,13 @@ async def prepare_device() -> tuple[str, str]:
                 udid=lockdown.udid,
                 version=lockdown.product_version,
             )
+            major_version = product_major_version(lockdown.product_version)
+            if major_version is not None and major_version < 27:
+                raise BridgeError(
+                    "usb_video_requires_ios27",
+                    "Apple enables safe USB video only on iPadOS 27 or later. Switching to AirPlay Wi-Fi.",
+                    27,
+                )
             if not await lockdown.get_developer_mode_status():
                 with contextlib.suppress(Exception):
                     await AmfiService(lockdown).reveal_developer_mode_option_in_ui()
@@ -371,6 +385,13 @@ async def run_bridge() -> int:
         return 0
     except Exception as exc:
         message = str(exc).strip() or type(exc).__name__
+        if "remote control requires ios 27.0 or later" in message.lower():
+            emit_status(
+                "error",
+                "Apple enables safe USB video only on iPadOS 27 or later. Switching to AirPlay Wi-Fi.",
+                code="usb_video_requires_ios27",
+            )
+            return 27
         if "displayservice" in message.lower() or "no such service" in message.lower():
             emit_status(
                 "error",
@@ -393,7 +414,10 @@ def main() -> int:
     args = parse_args()
     if args.probe:
         try:
+            import developer_disk_image  # noqa: F401
+            import pyimg4  # noqa: F401
             from pymobiledevice3.lockdown import create_using_usbmux  # noqa: F401
+            from pymobiledevice3.services.mobile_image_mounter import auto_mount  # noqa: F401
             from pymobiledevice3.remote.userspace_tunnel import UserspaceRsdTunnel  # noqa: F401
         except Exception as exc:
             emit_status("error", f"USB bridge dependency check failed: {exc}", code="dependency_error")

@@ -4,6 +4,7 @@ PadMirror là ứng dụng mirror màn hình iPad dành cho chơi game, bám the
 
 - USB là đường chính. Trên Windows, capture đi qua Apple Mobile Device Service và RemoteXPC user-space, không dùng kernel capture driver.
 - Video USB Windows là HEVC, audio là AAC-ELD 48 kHz; pipeline giữ queue ngắn để ưu tiên độ trễ thấp.
+- Apple chỉ mở API video USB an toàn từ iPadOS 27. Với iPadOS 26, PadMirror tự chuyển sang AirPlay Wi-Fi thay vì cài lại driver kernel không an toàn.
 - Windows 10 x64 dùng D3D11 + WASAPI; macOS dùng VideoToolbox + CoreAudio.
 - Cùng một mạng Wi-Fi có thể mirror qua AirPlay bằng UxPlay chạy như một tiến trình GPLv3 riêng.
 

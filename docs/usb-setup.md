@@ -4,6 +4,8 @@
 
 PadMirror chỉ dùng stack USB chính chủ của Apple: Apple Devices, Apple Mobile Device Service, pairing/trust và RemoteXPC user-space. Bản Windows không mở iPad bằng raw `libusb` và không cần kernel capture driver.
 
+Apple chỉ cho phép `DisplayService` truyền video USB từ iPadOS 27. Nếu iPad đang chạy iPadOS 26, PadMirror tự chuyển sang receiver AirPlay Wi-Fi trên cùng mạng; ứng dụng không hạ cấp về UsbDk để tránh tái diễn màn hình xanh.
+
 1. Cài **Apple Devices** từ Microsoft Store.
 2. Cắm iPad bằng cáp data, mở khóa và chọn **Trust This Computer**.
 3. Trên iPad, bật `Settings -> Privacy & Security -> Developer Mode`, restart iPad và xác nhận bật Developer Mode.
@@ -43,6 +45,7 @@ Log Windows: `%LOCALAPPDATA%\PadMirror\PadMirror\logs\padmirror.log`.
 | Enable Developer Mode | Bật Developer Mode, restart iPad và xác nhận sau khi máy lên |
 | Developer Disk Image setup failed | Kiểm tra Internet, ngày giờ Windows và thử lại |
 | Apple DisplayService is unavailable | Xác nhận Developer Mode đã bật, rút/cắm lại iPad |
+| Safe USB video requires iPadOS 27 | App tự chuyển sang AirPlay Wi-Fi; chọn `PadMirror` trong Screen Mirroring |
 | UsbDk was disabled and is pending removal | Restart Windows một lần rồi mở lại PadMirror |
 | HEVC decoder is unavailable | Cập nhật driver GPU hoặc chạy lại installer để repair GStreamer |
 | Audio device unavailable | Chọn lại DAC, rút/cắm DAC rồi restart receiver |

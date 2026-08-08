@@ -58,6 +58,9 @@ New-Item -ItemType Directory -Force -Path $distRoot, $workRoot, $specRoot | Out-
     --collect-data pymobiledevice3 `
     --collect-data developer_disk_image `
     --collect-all pytun_pmd3 `
+    --recursive-copy-metadata pymobiledevice3 `
+    --copy-metadata developer_disk_image `
+    --copy-metadata pyimg4 `
     --hidden-import usb.backend.libusb1 `
     $source
 if ($LASTEXITCODE -ne 0) { throw "USB bridge packaging failed" }

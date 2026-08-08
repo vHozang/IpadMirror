@@ -169,14 +169,20 @@ void RuntimeDependencies::configureEnvironment() {
 
         const auto cacheDir = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
         if (!cacheDir.isEmpty() && QDir().mkpath(cacheDir)) {
+            const auto registryOverride = qEnvironmentVariable("PADMIRROR_GST_REGISTRY");
+            const auto registrySeed = QStringLiteral("%1|%2")
+                .arg(
+                    QDir::toNativeSeparators(QCoreApplication::applicationFilePath()).toLower(),
+                    QCoreApplication::applicationVersion());
             const auto executableKey = QCryptographicHash::hash(
-                QDir::toNativeSeparators(QCoreApplication::applicationFilePath()).toLower().toUtf8(),
-                QCryptographicHash::Sha256).toHex().left(12);
+                registrySeed.toUtf8(), QCryptographicHash::Sha256).toHex().left(12);
             qputenv(
                 "GST_REGISTRY_1_0",
-                QDir(cacheDir).filePath(
-                    QStringLiteral("gstreamer-registry-%1.bin")
-                        .arg(QString::fromLatin1(executableKey))).toLocal8Bit());
+                (registryOverride.isEmpty()
+                    ? QDir(cacheDir).filePath(
+                        QStringLiteral("gstreamer-registry-%1.bin")
+                            .arg(QString::fromLatin1(executableKey)))
+                    : registryOverride).toLocal8Bit());
         }
     }
 

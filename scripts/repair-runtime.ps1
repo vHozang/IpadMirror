@@ -88,4 +88,18 @@ if ($ForceGStreamer -or -not $gstreamerReady) {
     Copy-Item (Join-Path $installedRoot "libexec\gstreamer-1.0\gst-plugin-scanner.exe") $scannerTarget -Force
 }
 
+$scannerTarget = Join-Path $applicationRoot "libexec\gstreamer-1.0"
+if (Test-Path (Join-Path $scannerTarget "gst-plugin-scanner.exe")) {
+    foreach ($runtimeDll in @(
+        "msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll",
+        "msvcp140_atomic_wait.dll", "msvcp140_codecvt_ids.dll",
+        "vcruntime140.dll", "vcruntime140_1.dll", "vcruntime140_threads.dll"
+    )) {
+        $runtimePath = Join-Path $applicationRoot $runtimeDll
+        if (Test-Path $runtimePath) {
+            Copy-Item $runtimePath $scannerTarget -Force
+        }
+    }
+}
+
 Write-Host "PadMirror runtime repair completed."

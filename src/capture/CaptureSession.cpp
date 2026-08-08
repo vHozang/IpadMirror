@@ -248,6 +248,7 @@ void CaptureSession::handleBridgeLine(const QByteArray& line) {
     const auto object = document.object();
     const auto event = object.value(QStringLiteral("event")).toString();
     const auto message = object.value(QStringLiteral("message")).toString();
+    const auto code = object.value(QStringLiteral("code")).toString();
     if (event == QStringLiteral("device")) {
         emit stateChanged(State::DeviceFound);
     } else if (event == QStringLiteral("mounting") || event == QStringLiteral("tunnel")) {
@@ -256,6 +257,10 @@ void CaptureSession::handleBridgeLine(const QByteArray& line) {
         emit stateChanged(State::Streaming);
     } else if (event == QStringLiteral("error")) {
         bridgeFatalError_ = true;
+        if (code == QStringLiteral("usb_video_requires_ios27")) {
+            emit wifiFallbackRequested(message);
+            return;
+        }
         if (!message.isEmpty()) publishError(message.toStdString());
         return;
     }

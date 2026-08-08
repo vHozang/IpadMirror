@@ -6,7 +6,7 @@
 #endif
 
 #define AppName "PadMirror"
-#define AppVersion "0.1.6"
+#define AppVersion "0.1.8"
 
 [Setup]
 AppId={{475CC31D-376B-4C26-A4C1-23DF219178EE}

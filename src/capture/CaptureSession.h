@@ -43,6 +43,7 @@ signals:
     void stateChanged(padmirror::capture::CaptureSession::State state);
     void errorOccurred(const QString& message);
     void statusOccurred(const QString& message);
+    void wifiFallbackRequested(const QString& message);
 
 private:
     void publishState(State state);
