@@ -162,7 +162,8 @@ bool LanReceiver::start(const QString& configuredPath, std::uint16_t videoPort, 
     const auto lan = lanInterfaces.front();
 
     const auto videoForward = QStringLiteral(
-        "config-interval=1 ! udpsink host=127.0.0.1 port=%1 sync=false async=false")
+        "config-interval=-1 ! udpsink host=127.0.0.1 port=%1 "
+        "buffer-size=4194304 sync=false async=false")
         .arg(videoPort);
     const auto audioForward = QStringLiteral(
         "pt=96 ! udpsink host=127.0.0.1 port=%1 sync=false async=false")

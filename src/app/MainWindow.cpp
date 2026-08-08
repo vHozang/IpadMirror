@@ -195,9 +195,11 @@ void MainWindow::updateLayerVisibility() {
 void MainWindow::updateStreamStatus() {
     if (!streamStatus_) return;
     const auto fps = qRound(controller_->metrics()->renderFps());
-    streamStatus_->setText(QStringLiteral("%1  /  %2  /  %3 FPS")
-        .arg(controller_->connectionLabel(), controller_->statusText())
-        .arg(fps));
+    const auto fpsText = fps > 0
+        ? QStringLiteral("%1 FPS").arg(fps)
+        : (controller_->streaming() ? QStringLiteral("IDLE") : QStringLiteral("-- FPS"));
+    streamStatus_->setText(QStringLiteral("%1  /  %2  /  %3")
+        .arg(controller_->connectionLabel(), controller_->statusText(), fpsText));
 }
 
 } // namespace padmirror::app

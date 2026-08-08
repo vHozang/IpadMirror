@@ -66,8 +66,9 @@ AppController::AppController(QObject* parent)
         statusText_ = QStringLiteral("Choose PadMirror in iPad Screen Mirroring");
         emit stateChanged();
     });
-    connect(&lanReceiver_, &network::LanReceiver::logLine, this, [](const QString& line) {
+    connect(&lanReceiver_, &network::LanReceiver::logLine, this, [this](const QString& line) {
         qInfo().noquote() << "UxPlay:" << line;
+        handleLanLogLine(line);
     });
     connect(&settings_, &Settings::connectionModeChanged, this, [this] {
         if (active_) restart();
@@ -78,14 +79,20 @@ AppController::AppController(QObject* parent)
     lanMetricsTimer_.setInterval(300);
     connect(&lanMetricsTimer_, &QTimer::timeout, this, [this] {
         if (settings_.connectionMode() != Settings::ConnectionMode::AirPlayWifi || !active_) return;
-        const bool nowStreaming = metrics_.sourceFps() > 1.0;
-        if (streaming_ != nowStreaming) {
-            streaming_ = nowStreaming;
-            statusText_ = streaming_ ? QStringLiteral("AirPlay streaming") :
-                (lanReceiver_.running()
-                    ? QStringLiteral("Choose PadMirror in iPad Screen Mirroring")
-                    : QStringLiteral("Preparing AirPlay receiver"));
+        if (!streaming_ && metrics_.sourceFps() > 0.0) {
+            streaming_ = true;
+            statusText_ = QStringLiteral("AirPlay streaming");
             emit stateChanged();
+            return;
+        }
+        if (streaming_) {
+            const auto nextStatus = metrics_.sourceFps() > 1.0
+                ? QStringLiteral("AirPlay streaming")
+                : QStringLiteral("AirPlay connected - screen idle");
+            if (statusText_ != nextStatus) {
+                statusText_ = nextStatus;
+                emit stateChanged();
+            }
         }
     });
     lanMetricsTimer_.start();
@@ -293,6 +300,34 @@ void AppController::handleCaptureState(capture::CaptureSession::State state) {
         break;
     }
     emit stateChanged();
+}
+
+void AppController::handleLanLogLine(const QString& line) {
+    if (settings_.connectionMode() != Settings::ConnectionMode::AirPlayWifi || !active_) return;
+
+    if (line.contains(QStringLiteral("Begin streaming to GStreamer video pipeline"),
+                      Qt::CaseInsensitive)) {
+        streaming_ = true;
+        errorText_.clear();
+        statusText_ = QStringLiteral("AirPlay streaming");
+        emit stateChanged();
+        return;
+    }
+    if (line.contains(QStringLiteral("raop_rtp_mirror->running is no longer true"),
+                      Qt::CaseInsensitive)) {
+        streaming_ = false;
+        metrics_.reset();
+        statusText_ = lanReceiver_.running()
+            ? QStringLiteral("Choose PadMirror in iPad Screen Mirroring")
+            : QStringLiteral("Preparing AirPlay receiver");
+        emit stateChanged();
+        return;
+    }
+    if (!streaming_ && line.contains(QStringLiteral("Accepted IPv4 client"),
+                                     Qt::CaseInsensitive)) {
+        statusText_ = QStringLiteral("iPad connected - waiting for video");
+        emit stateChanged();
+    }
 }
 
 void AppController::setError(const QString& message) {

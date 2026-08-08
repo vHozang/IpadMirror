@@ -10,6 +10,7 @@
 
 #include <QString>
 
+#include <algorithm>
 #include <utility>
 #include <vector>
 
@@ -126,7 +127,7 @@ bool LanPipeline::start(
 
     auto* pipeline = gst_pipeline_new("padmirror-airplay-lan");
     auto* videoSource = gst_element_factory_make("udpsrc", "airplay-video-source");
-    auto* videoJitter = gst_element_factory_make("rtpjitterbuffer", "airplay-video-jitter");
+    auto* videoIngressQueue = gst_element_factory_make("queue", "airplay-video-ingress");
     auto* videoDepay = gst_element_factory_make("rtph264depay", "airplay-video-depay");
     auto* parser = gst_element_factory_make("h264parse", "airplay-h264-parser");
     auto* decoder = gst_element_factory_make(decoderName.c_str(), "airplay-video-decoder");
@@ -134,15 +135,15 @@ bool LanPipeline::start(
     auto* videoSink = gst_element_factory_make(videoSinkName.c_str(), "airplay-video-output");
 
     auto* audioSource = gst_element_factory_make("udpsrc", "airplay-audio-source");
-    auto* audioJitter = gst_element_factory_make("rtpjitterbuffer", "airplay-audio-jitter");
     auto* audioDepay = gst_element_factory_make("rtpL16depay", "airplay-audio-depay");
     auto* audioConvert = gst_element_factory_make("audioconvert", "airplay-audio-convert");
     auto* audioResample = gst_element_factory_make("audioresample", "airplay-audio-resample");
+    auto* audioCapsFilter = gst_element_factory_make("capsfilter", "airplay-audio-48khz");
     auto* audioQueue = gst_element_factory_make("queue", "airplay-live-audio-queue");
 
-    if (!pipeline || !videoSource || !videoJitter || !videoDepay || !parser || !decoder ||
-        !videoQueue || !videoSink || !audioSource || !audioJitter || !audioDepay ||
-        !audioConvert || !audioResample || !audioQueue) {
+    if (!pipeline || !videoSource || !videoIngressQueue || !videoDepay || !parser || !decoder ||
+        !videoQueue || !videoSink || !audioSource || !audioDepay || !audioConvert ||
+        !audioResample || !audioCapsFilter || !audioQueue) {
         if (pipeline) gst_object_unref(pipeline);
         else gst_object_unref(audioSink);
         if (errorHandler) errorHandler("Cannot create the AirPlay RTP pipeline");
@@ -164,45 +165,78 @@ bool LanPipeline::start(
         "channels", G_TYPE_INT, 2,
         "payload", G_TYPE_INT, 96,
         nullptr);
-    g_object_set(videoSource, "port", static_cast<gint>(videoPort), "caps", videoCaps, nullptr);
+    g_object_set(
+        videoSource,
+        "port", static_cast<gint>(videoPort),
+        "buffer-size", 16 * 1024 * 1024,
+        "caps", videoCaps,
+        nullptr);
     g_object_set(audioSource, "port", static_cast<gint>(audioPort), "caps", audioCaps, nullptr);
     gst_caps_unref(videoCaps);
     gst_caps_unref(audioCaps);
 
-    g_object_set(videoJitter, "latency", 15, "drop-on-latency", TRUE, nullptr);
-    g_object_set(audioJitter, "latency", settings.audioBufferMs(), "drop-on-latency", TRUE, nullptr);
+    auto* audioOutputCaps = gst_caps_new_simple(
+        "audio/x-raw",
+        "format", G_TYPE_STRING, "S16LE",
+        "layout", G_TYPE_STRING, "interleaved",
+        "rate", G_TYPE_INT, 48000,
+        "channels", G_TYPE_INT, 2,
+        nullptr);
+    g_object_set(audioCapsFilter, "caps", audioOutputCaps, nullptr);
+    gst_caps_unref(audioOutputCaps);
+
+    // UxPlay forwards RTP over localhost. Drain the UDP socket on its own thread so
+    // decoder or GPU stalls cannot overflow the kernel buffer during large keyframes.
+    g_object_set(
+        videoIngressQueue,
+        "max-size-buffers", 0,
+        "max-size-bytes", 8 * 1024 * 1024,
+        "max-size-time", static_cast<guint64>(150) * GST_MSECOND,
+        "leaky", 0,
+        nullptr);
+    setBooleanIfPresent(videoDepay, "wait-for-keyframe", TRUE);
+    setBooleanIfPresent(videoDepay, "request-keyframe", TRUE);
+    if (g_object_class_find_property(G_OBJECT_GET_CLASS(parser), "config-interval")) {
+        g_object_set(parser, "config-interval", -1, nullptr);
+    }
+    setBooleanIfPresent(parser, "disable-passthrough", TRUE);
+    setBooleanIfPresent(decoder, "discard-corrupted-frames", TRUE);
     g_object_set(
         videoQueue,
-        "max-size-buffers", 1,
+        "max-size-buffers", 3,
         "max-size-bytes", 0,
-        "max-size-time", static_cast<guint64>(0),
+        "max-size-time", static_cast<guint64>(50) * GST_MSECOND,
         "leaky", 2,
         nullptr);
+    const auto airplayAudioBufferMs = std::max(settings.audioBufferMs(), 40);
     g_object_set(
         audioQueue,
         "max-size-buffers", 0,
         "max-size-bytes", 0,
-        "max-size-time", static_cast<guint64>(settings.audioBufferMs()) * GST_MSECOND,
-        "leaky", 2,
+        "max-size-time", static_cast<guint64>(airplayAudioBufferMs) * GST_MSECOND,
+        "leaky", 0,
         nullptr);
     setBooleanIfPresent(videoSink, "sync", FALSE);
-    setBooleanIfPresent(videoSink, "qos", TRUE);
+    setBooleanIfPresent(videoSink, "async", FALSE);
+    setBooleanIfPresent(videoSink, "qos", FALSE);
+    setBooleanIfPresent(videoSink, "enable-last-sample", TRUE);
     setBooleanIfPresent(videoSink, "force-aspect-ratio", settings.maintainAspectRatio());
-    setBooleanIfPresent(audioSink, "sync", settings.strictSync() ? TRUE : FALSE);
-    const bool safeMode = settings.audioMode() == app::Settings::AudioMode::Safe;
-    const bool exclusive = settings.audioMode() == app::Settings::AudioMode::Exclusive;
-    setBooleanIfPresent(audioSink, "low-latency", safeMode ? FALSE : TRUE);
-    setBooleanIfPresent(audioSink, "exclusive", exclusive ? TRUE : FALSE);
+    setBooleanIfPresent(audioSink, "sync", FALSE);
+    setBooleanIfPresent(audioSink, "low-latency", FALSE);
+    setBooleanIfPresent(audioSink, "exclusive", FALSE);
 
     gst_bin_add_many(
         GST_BIN(pipeline),
-        videoSource, videoJitter, videoDepay, parser, decoder, videoQueue, videoSink,
-        audioSource, audioJitter, audioDepay, audioConvert, audioResample, audioQueue, audioSink,
+        videoSource, videoIngressQueue, videoDepay, parser, decoder, videoQueue, videoSink,
+        audioSource, audioDepay, audioConvert, audioResample, audioCapsFilter, audioQueue, audioSink,
         nullptr);
     const bool videoLinked = gst_element_link_many(
-        videoSource, videoJitter, videoDepay, parser, decoder, videoQueue, videoSink, nullptr);
+        videoSource, videoIngressQueue, videoDepay, parser, decoder, videoQueue, videoSink, nullptr);
+    // UxPlay already decodes and packetizes PCM over localhost; an RTP jitter buffer here
+    // causes audible drops when the source switches between AAC-ELD and ALAC sessions.
     const bool audioLinked = gst_element_link_many(
-        audioSource, audioJitter, audioDepay, audioConvert, audioResample, audioQueue, audioSink, nullptr);
+        audioSource, audioDepay, audioConvert, audioResample, audioCapsFilter,
+        audioQueue, audioSink, nullptr);
     if (!videoLinked || !audioLinked) {
         gst_object_unref(pipeline);
         if (errorHandler) errorHandler("Cannot link the AirPlay low-latency pipeline");

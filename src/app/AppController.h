@@ -70,6 +70,7 @@ private:
     void startUsb();
     void startWifi();
     void handleCaptureState(capture::CaptureSession::State state);
+    void handleLanLogLine(const QString& line);
     void setError(const QString& message);
     void publishMediaError(const std::string& message);
     void updateWindowFlags();

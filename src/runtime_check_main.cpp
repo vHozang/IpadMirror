@@ -8,7 +8,7 @@ int main(int argc, char* argv[]) {
     QCoreApplication application(argc, argv);
     QCoreApplication::setOrganizationName(QStringLiteral("PadMirror"));
     QCoreApplication::setApplicationName(QStringLiteral("PadMirror"));
-    QCoreApplication::setApplicationVersion(QStringLiteral("0.1.8"));
+    QCoreApplication::setApplicationVersion(QStringLiteral("0.1.10"));
     padmirror::app::RuntimeDependencies::configureEnvironment();
 
     const auto missing = padmirror::app::RuntimeDependencies::missingComponents();
