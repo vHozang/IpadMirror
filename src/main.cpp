@@ -6,6 +6,7 @@
 #include <QApplication>
 #include <QCoreApplication>
 #include <QFile>
+#include <QIcon>
 #include <QMessageBox>
 #include <QPixmap>
 #include <QProcess>
@@ -13,11 +14,19 @@
 #include <QTextStream>
 #include <QTimer>
 
+#ifdef Q_OS_WIN
+#include <shobjidl_core.h>
+#endif
+
 int main(int argc, char* argv[]) {
+#ifdef Q_OS_WIN
+    SetCurrentProcessExplicitAppUserModelID(L"PadMirror.Desktop");
+#endif
     QApplication application(argc, argv);
     QCoreApplication::setOrganizationName(QStringLiteral("PadMirror"));
     QCoreApplication::setApplicationName(QStringLiteral("PadMirror"));
-    QCoreApplication::setApplicationVersion(QStringLiteral("0.1.10"));
+    QCoreApplication::setApplicationVersion(QStringLiteral("0.1.11"));
+    application.setWindowIcon(QIcon(QStringLiteral(":/assets/icons/PadMirror-256.png")));
     QQuickStyle::setStyle(QStringLiteral("Basic"));
     padmirror::app::installLogging();
     padmirror::app::RuntimeDependencies::configureEnvironment();

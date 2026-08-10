@@ -43,6 +43,7 @@ set(PADMIRROR_APP_SOURCES
 
 if(WIN32)
     list(APPEND PADMIRROR_APP_SOURCES
+        platform/windows/PadMirror.rc
         platform/windows/WindowsPower.cpp
         platform/windows/WindowsVideo.cpp
         platform/windows/WasapiAudio.cpp
@@ -73,6 +74,7 @@ qt_add_resources(padmirror padmirror_ui
         "${CMAKE_CURRENT_SOURCE_DIR}/../ui/WaitingView.qml"
         "${CMAKE_CURRENT_SOURCE_DIR}/../ui/SettingsView.qml"
         "${CMAKE_CURRENT_SOURCE_DIR}/../ui/DiagnosticsOverlay.qml"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../assets/icons/PadMirror-256.png"
 )
 
 target_include_directories(padmirror PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
@@ -99,7 +101,7 @@ if(PADMIRROR_HAVE_IMOBILEDEVICE)
 endif()
 
 if(WIN32)
-    target_link_libraries(padmirror PRIVATE user32 dwmapi advapi32 setupapi)
+    target_link_libraries(padmirror PRIVATE user32 dwmapi advapi32 setupapi shell32)
 elseif(APPLE)
     target_link_libraries(padmirror PRIVATE
         "-framework IOKit"

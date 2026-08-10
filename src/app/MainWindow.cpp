@@ -6,6 +6,7 @@
 #include <QDebug>
 #include <QEvent>
 #include <QHBoxLayout>
+#include <QIcon>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QMouseEvent>
@@ -25,6 +26,7 @@ MainWindow::MainWindow(AppController* controller, QWidget* parent)
       controller_(controller) {
     setWindowTitle(QStringLiteral("PadMirror"));
     setWindowFlags(Qt::Window | Qt::FramelessWindowHint);
+    setWindowIcon(QIcon(QStringLiteral(":/assets/icons/PadMirror-256.png")));
     setAttribute(Qt::WA_NativeWindow);
     setAutoFillBackground(true);
     auto windowPalette = palette();

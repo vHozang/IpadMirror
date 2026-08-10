@@ -1,0 +1,59 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- Background Gradient -->
+    <linearGradient id="bg-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0A0C10" />
+      <stop offset="100%" stop-color="#030406" />
+    </linearGradient>
+
+    <!-- Cyan Glow Filter -->
+    <filter id="neon-glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="8" result="blur1" />
+      <feGaussianBlur stdDeviation="16" result="blur2" />
+      <feMerge>
+        <feMergeNode in="blur2" />
+        <feMergeNode in="blur1" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+
+    <!-- Grid Pattern -->
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M 32 0 L 0 0 0 32" fill="none" stroke="#161B25" stroke-width="1.5" />
+    </pattern>
+    
+    <!-- Cutout Mask for AirPlay Triangle -->
+    <mask id="cutout">
+      <rect width="512" height="512" fill="white" />
+      <!-- Cắt một khoảng trống lớn hơn tam giác một chút để tạo khe hở (gap) -->
+      <polygon points="256,275 165,395 347,395" fill="black" />
+    </mask>
+  </defs>
+
+  <!-- Base App Icon Shape -->
+  <rect width="512" height="512" rx="112" fill="url(#bg-grad)" />
+  
+  <!-- Subtle Grid overlay matching UI -->
+  <rect width="512" height="512" rx="112" fill="url(#grid)" />
+
+  <!-- Outer container matching the UI's rounded box feel -->
+  <rect x="40" y="40" width="432" height="432" rx="88" stroke="#161B25" stroke-width="2" fill="none" />
+
+  <!-- Logo Mark Layer with Neon Glow -->
+  <g filter="url(#neon-glow)">
+    <!-- Main Screen/Tablet Outline -->
+    <rect x="116" y="146" width="280" height="190" rx="20" stroke="#42E0ED" stroke-width="26" fill="none" mask="url(#cutout)" />
+    
+    <!-- Cast/AirPlay Triangle inside the cutout space -->
+    <polygon points="256,310 196,380 316,380" fill="#42E0ED" />
+    
+    <!-- Inner Screen Detail (Reflecting the "Mirror" aspect) -->
+    <rect x="156" y="176" width="200" height="130" rx="12" stroke="#10575F" stroke-width="6" fill="none" />
+  </g>
+
+  <!-- App Name Text -->
+  <text x="256" y="445" font-family="Arial, Helvetica, sans-serif" font-size="28" font-weight="bold" fill="#71849C" text-anchor="middle" letter-spacing="6">PADMIRROR</text>
+  
+  <!-- UI Accent mark (like top left in screenshot) -->
+  <rect x="116" y="423" width="6" height="24" fill="#42E0ED" />
+</svg>

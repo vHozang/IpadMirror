@@ -6,7 +6,7 @@
 #endif
 
 #define AppName "PadMirror"
-#define AppVersion "0.1.10"
+#define AppVersion "0.1.11"
 
 [Setup]
 AppId={{475CC31D-376B-4C26-A4C1-23DF219178EE}
@@ -20,6 +20,7 @@ ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=lowest
 OutputDir={#DistDir}
 OutputBaseFilename=PadMirrorSetup
+SetupIconFile=..\assets\icons\PadMirror.ico
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
@@ -46,8 +47,8 @@ Type: filesandordirs; Name: "{app}\licenses\libusb-win32"
 Type: filesandordirs; Name: "{app}\licenses\UsbDk"
 
 [Icons]
-Name: "{autoprograms}\PadMirror"; Filename: "{app}\PadMirror.exe"
-Name: "{autodesktop}\PadMirror"; Filename: "{app}\PadMirror.exe"; Tasks: desktopicon
+Name: "{autoprograms}\PadMirror"; Filename: "{app}\PadMirror.exe"; IconFilename: "{app}\PadMirror.exe"; IconIndex: 0; AppUserModelID: "PadMirror.Desktop"
+Name: "{autodesktop}\PadMirror"; Filename: "{app}\PadMirror.exe"; IconFilename: "{app}\PadMirror.exe"; IconIndex: 0; AppUserModelID: "PadMirror.Desktop"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\dependencies\VC_redist.x64.exe"; Parameters: "/install /quiet /norestart"; StatusMsg: "Dang cai Microsoft Visual C++ Runtime..."; Flags: waituntilterminated skipifdoesntexist; Check: not VcRuntimeInstalled
