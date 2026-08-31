@@ -6,96 +6,42 @@
 
 #include <QMetaObject>
 #include <QPointer>
-#include <QDebug>
+
+#include <utility>
 
 namespace padmirror::app {
 
 AppController::AppController(QObject* parent)
     : QObject(parent),
       captureSession_(&mediaSession_, this),
-      lanReceiver_(this) {
+      airPlayBackend_(mediaSession_),
+      coordinator_(mediaSession_, usbBackend_, airPlayBackend_) {
     connect(&captureSession_, &capture::CaptureSession::stateChanged,
             this, &AppController::handleCaptureState);
     connect(&captureSession_, &capture::CaptureSession::errorOccurred,
             this, &AppController::setError);
-    connect(&captureSession_, &capture::CaptureSession::statusOccurred, this, [this](const QString& message) {
-        if (active_ && settings_.connectionMode() == Settings::ConnectionMode::UsbGaming) {
-            statusText_ = message;
-            emit stateChanged();
-        }
-    });
-    connect(&captureSession_, &capture::CaptureSession::wifiFallbackRequested, this,
-        [this](const QString& message) {
-            QTimer::singleShot(0, this, [this, message] {
-                if (!active_ || settings_.connectionMode() != Settings::ConnectionMode::UsbGaming) return;
-                if (!wifiAvailable()) {
-                    active_ = false;
-                    setError(message + QStringLiteral(" UxPlay is unavailable."));
-                    return;
-                }
-                qWarning().noquote() << message;
-                statusText_ = message;
-                emit stateChanged();
-                settings_.setConnectionMode(Settings::ConnectionMode::AirPlayWifi);
-            });
-        });
-    connect(&deviceManager_, &device::DeviceManager::devicesChanged, this, [this] {
-        if (deviceManager_.hasDevice()) {
-            metrics_.setDeviceName(deviceManager_.currentName());
-        }
-        if (active_ && settings_.connectionMode() == Settings::ConnectionMode::UsbGaming &&
-            deviceManager_.hasDevice() && !usbDriverInstallInProgress_ &&
-            (!RuntimeDependencies::usbCaptureDriverInstalled() || !captureSession_.running())) {
-            captureSession_.stop();
-            mediaSession_.stop();
-            startUsb();
-            return;
-        }
-        emit stateChanged();
-    });
-    connect(&lanReceiver_, &network::LanReceiver::errorOccurred, this, [this](const QString& message) {
-        if (settings_.connectionMode() == Settings::ConnectionMode::AirPlayWifi) {
-            mediaSession_.stop();
-            active_ = false;
-            streaming_ = false;
-        }
-        setError(message);
-    });
-    connect(&lanReceiver_, &network::LanReceiver::started, this, [this] {
-        if (settings_.connectionMode() != Settings::ConnectionMode::AirPlayWifi || !active_) return;
-        statusText_ = QStringLiteral("Choose PadMirror in iPad Screen Mirroring");
-        emit stateChanged();
-    });
-    connect(&lanReceiver_, &network::LanReceiver::logLine, this, [this](const QString& line) {
-        qInfo().noquote() << "UxPlay:" << line;
-        handleLanLogLine(line);
-    });
+    coordinator_.setMediaHandlers(
+        [this] { return armMedia(); },
+        [this] { mediaSession_.stop(); });
     connect(&settings_, &Settings::connectionModeChanged, this, [this] {
         if (active_) restart();
         else emit stateChanged();
     });
-    connect(&settings_, &Settings::alwaysOnTopChanged, this, &AppController::updateWindowFlags);
-
-    lanMetricsTimer_.setInterval(300);
-    connect(&lanMetricsTimer_, &QTimer::timeout, this, [this] {
-        if (settings_.connectionMode() != Settings::ConnectionMode::AirPlayWifi || !active_) return;
-        if (!streaming_ && metrics_.sourceFps() > 0.0) {
-            streaming_ = true;
-            statusText_ = QStringLiteral("AirPlay streaming");
-            emit stateChanged();
-            return;
+    connect(&settings_, &Settings::airPlayQualityChanged, this, [this] {
+        // A quality preference must not interrupt a live session; it applies on
+        // the next explicit Apply/start. Refresh the shown label only.
+        if (active_ && settings_.connectionMode() == Settings::ConnectionMode::AirPlayWifi) {
+            metrics_.setRequestedQuality(airPlayQualityLabel());
         }
-        if (streaming_) {
-            const auto nextStatus = metrics_.sourceFps() > 1.0
-                ? QStringLiteral("AirPlay streaming")
-                : QStringLiteral("AirPlay connected - screen idle");
-            if (statusText_ != nextStatus) {
-                statusText_ = nextStatus;
-                emit stateChanged();
-            }
-        }
+        emit stateChanged();
     });
-    lanMetricsTimer_.start();
+    connect(&settings_, &Settings::alwaysOnTopChanged, this, &AppController::updateWindowFlags);
+    // AirPlay has no CaptureSession state machine to drive `streaming_` (that
+    // path is USB-only). Instead, watch the 250 ms metrics tick: once decoded
+    // video frames are actually flowing, promote the AirPlay session from the
+    // Waiting overlay to the live player, and demote it if frames stop.
+    connect(&metrics_, &diagnostics::Metrics::changed, this,
+            &AppController::updateAirPlayStreaming);
     refreshAudioDevices();
 }
 
@@ -108,9 +54,9 @@ void AppController::setMainWindow(MainWindow* window) {
     updateWindowFlags();
 }
 
-void AppController::setVideoWindowHandle(std::uintptr_t handle) {
-    videoWindowHandle_ = handle;
-    mediaSession_.setWindowHandle(handle);
+void AppController::setVideoWindowHandle(std::uintptr_t windowHandle) {
+    videoWindowHandle_ = windowHandle;
+    mediaSession_.setWindowHandle(windowHandle);
 }
 
 Settings* AppController::settings() { return &settings_; }
@@ -124,37 +70,48 @@ bool AppController::fullscreen() const { return mainWindow_ && mainWindow_->isFu
 QString AppController::connectionLabel() const {
     return settings_.connectionMode() == Settings::ConnectionMode::UsbGaming
         ? QStringLiteral("USB")
-        : QStringLiteral("WI-FI");
+        : QStringLiteral("AIRPLAY");
 }
 QVariantList AppController::audioDevices() const { return audioDevices_; }
-bool AppController::wifiAvailable() const { return !network::LanReceiver::findUxPlay(settings_.uxplayPath()).isEmpty(); }
-QStringList AppController::wifiAddresses() const { return network::LanReceiver::localIpv4Addresses(); }
+bool AppController::wifiAvailable() const {
+    return airPlayBackend_.health().available;
+}
 
 void AppController::start() {
     stop();
-    active_ = true;
+    metrics_.reset();
     errorText_.clear();
     streaming_ = false;
-    metrics_.reset();
-    platform::setGamingPowerActive(settings_.gamingMode());
+    active_ = true;
+    platform::setGamingPowerActive(true);
     if (settings_.connectionMode() == Settings::ConnectionMode::UsbGaming) startUsb();
-    else startWifi();
+    else startAirPlay();
+    if (!active_) platform::setGamingPowerActive(false);
     emit stateChanged();
 }
 
 void AppController::stop() {
     captureSession_.stop();
-    lanReceiver_.stop();
-    mediaSession_.stop();
+    // The coordinator owns media teardown (via the registered handler), the
+    // active backend stop/shutdown, and the flush/EOS ordering.
+    coordinator_.stop();
     platform::setGamingPowerActive(false);
     active_ = false;
     streaming_ = false;
-    if (statusText_ != QStringLiteral("Ready")) statusText_ = QStringLiteral("Ready");
+    errorText_.clear();
+    statusText_ = QStringLiteral("Ready");
+    metrics_.setTransportState(QStringLiteral("Stopped"));
+    metrics_.clearAudioBuffer();
     emit stateChanged();
 }
 
 void AppController::restart() {
     start();
+}
+
+void AppController::applySettings() {
+    if (!active_) return;
+    restart();
 }
 
 void AppController::refreshAudioDevices() {
@@ -186,99 +143,79 @@ void AppController::beginWindowMove() {
     if (mainWindow_) mainWindow_->beginSystemMove();
 }
 
-void AppController::startUsb() {
-    if (RuntimeDependencies::usbCleanupRestartRequired()) {
-        active_ = false;
-        setError(QStringLiteral(
-            "UsbDk was disabled and is pending removal. Restart Windows once before using USB mode."));
-        return;
-    }
-    if (!RuntimeDependencies::usbCaptureDriverInstalled()) {
-        if (usbDriverInstallInProgress_) return;
-        usbDriverInstallInProgress_ = true;
-        statusText_ = QStringLiteral("Preparing safe Apple USB support");
-        emit stateChanged();
-        const bool started = RuntimeDependencies::startBundledUsbDriverInstaller(this, [this](bool installed) {
-            usbDriverInstallInProgress_ = false;
-            if (!active_ || settings_.connectionMode() != Settings::ConnectionMode::UsbGaming) return;
-            if (!installed) {
-                active_ = false;
-                if (RuntimeDependencies::usbCleanupRestartRequired()) {
-                    setError(QStringLiteral(
-                        "UsbDk was disabled and is pending removal. Restart Windows once before using USB mode."));
-                    return;
-                }
-                setError(QStringLiteral(
-                    "USB needs Apple Devices and removal of unsafe UsbDk/libusb0 drivers. Approve the administrator prompt, then reconnect the iPad."));
-                return;
-            }
-            statusText_ = QStringLiteral("Safe Apple USB support is ready - reconnecting iPad");
-            emit stateChanged();
-            QTimer::singleShot(250, this, [this] {
-                if (active_ && settings_.connectionMode() == Settings::ConnectionMode::UsbGaming) startUsb();
-            });
-        });
-        if (!started) {
-            usbDriverInstallInProgress_ = false;
-            active_ = false;
-            setError(QStringLiteral(
-                "USB needs Apple Devices and removal of unsafe UsbDk/libusb0 drivers. Approve the administrator prompt, then reconnect the iPad."));
-        }
-        return;
-    }
+void AppController::showStreamingSettings() {
+    if (mainWindow_) mainWindow_->showStreamingSettings();
+}
 
-    metrics_.setTransport(QStringLiteral("USB"));
-    metrics_.setDeviceName(deviceManager_.hasDevice()
-        ? deviceManager_.currentName()
-        : QStringLiteral("iPad"));
-    if (!mediaSession_.startUsb(
-            settings_,
-#ifdef Q_OS_WIN
-            capture::VideoCodec::Hevc,
-            capture::AudioCodec::AacEld,
-#else
-            capture::VideoCodec::H264,
-            capture::AudioCodec::PcmS16Le,
-#endif
-            videoWindowHandle_, &metrics_,
-            [this](const std::string& message) { publishMediaError(message); })) {
+void AppController::startUsb() {
+    metrics_.setTransport(QStringLiteral("USB (Apple user-mode channel)"));
+    metrics_.setTransportState(QStringLiteral("Connecting"));
+    metrics_.setDeviceName(QStringLiteral("iPad via USB"));
+    metrics_.setRequestedQuality(QStringLiteral("H.264 / PCM 48 kHz"));
+    pendingVideoCodec_ = core::VideoCodec::H264;
+    pendingAudioCodec_ = core::AudioCodec::PcmS16Le;
+
+    // The coordinator arms media (via armMedia) before starting the backend,
+    // so no packet can arrive before the pipeline exists.
+    const bool started = coordinator_.startUsb();
+    const auto health = coordinator_.health();
+    metrics_.setHealthDetail(QString::fromStdString(health.detail));
+    if (!started) {
         active_ = false;
-        setError(QStringLiteral("Cannot start the USB media pipeline"));
+        metrics_.setTransportState(QStringLiteral("Unavailable"));
+        statusText_ = QStringLiteral("USB capture unavailable");
+        setError(QString::fromStdString(health.detail));
         return;
     }
-    statusText_ = deviceManager_.hasDevice()
-        ? QStringLiteral("Starting USB capture")
-        : QStringLiteral("Connect and unlock your iPad via USB");
-    if (deviceManager_.trustKnown() && !deviceManager_.currentTrusted()) {
-        statusText_ = QStringLiteral("Unlock the iPad and tap Trust This Computer");
-    }
+    metrics_.setTransportState(QStringLiteral("Waiting"));
+    statusText_ = QStringLiteral("USB ready - connect, unlock, and trust the iPad");
     captureSession_.start(deviceManager_.currentSerial());
 }
 
-void AppController::startWifi() {
+void AppController::startAirPlay() {
     metrics_.setTransport(QStringLiteral("AirPlay Wi-Fi"));
+    metrics_.setTransportState(QStringLiteral("Connecting"));
     metrics_.setDeviceName(QStringLiteral("iPad on local network"));
-    if (!mediaSession_.startLan(
-            settings_, kLanVideoPort, kLanAudioPort, videoWindowHandle_, &metrics_,
-            [this](const std::string& message) { publishMediaError(message); })) {
+    metrics_.setRequestedQuality(airPlayQualityLabel());
+    pendingVideoCodec_ = core::VideoCodec::H264;
+    // AirPlay screen mirroring delivers AAC-ELD audio (compression type ct=8),
+    // not raw PCM. Arm the pipeline for AAC-ELD so RaopReceiver's decoded audio
+    // packets match the active codec instead of being rejected as a mismatch.
+    pendingAudioCodec_ = core::AudioCodec::AacEld;
+
+    const bool started = coordinator_.enableAirPlay();
+    const auto health = coordinator_.health();
+    metrics_.setHealthDetail(QString::fromStdString(health.detail));
+    if (!started) {
         active_ = false;
-        setError(QStringLiteral("Cannot start the AirPlay receive pipeline"));
+        metrics_.setTransportState(QStringLiteral("Unavailable"));
+        statusText_ = QStringLiteral("AirPlay receiver unavailable");
+        setError(QString::fromStdString(health.detail));
         return;
     }
-    if (!lanReceiver_.start(settings_.uxplayPath(), kLanVideoPort, kLanAudioPort)) {
-        mediaSession_.stop();
-        active_ = false;
-        return;
-    }
-    statusText_ = QStringLiteral("Preparing AirPlay receiver");
+    metrics_.setTransportState(QStringLiteral("Waiting"));
+    statusText_ = QStringLiteral("Choose PadMirror-PC in iPad Screen Mirroring");
+}
+
+bool AppController::armMedia() {
+    return mediaSession_.start(
+        settings_, pendingVideoCodec_, pendingAudioCodec_,
+        videoWindowHandle_, &metrics_,
+        [this](const std::string& message) { publishMediaError(message); });
+}
+
+QString AppController::airPlayQualityLabel() const {
+    return settings_.airPlayQuality() == Settings::AirPlayQuality::P1080_60
+        ? QStringLiteral("1080p target (source cadence preserved)")
+        : QStringLiteral("Auto (source cadence preserved)");
 }
 
 void AppController::handleCaptureState(capture::CaptureSession::State state) {
-    if (settings_.connectionMode() != Settings::ConnectionMode::UsbGaming) return;
+    if (!active_ || settings_.connectionMode() != Settings::ConnectionMode::UsbGaming) return;
     switch (state) {
     case capture::CaptureSession::State::Disconnected:
         streaming_ = false;
-        statusText_ = QStringLiteral("Connect and unlock your iPad via USB");
+        statusText_ = QStringLiteral("USB disconnected");
         break;
     case capture::CaptureSession::State::DeviceFound:
         statusText_ = QStringLiteral("iPad detected");
@@ -287,51 +224,42 @@ void AppController::handleCaptureState(capture::CaptureSession::State state) {
         statusText_ = QStringLiteral("Waiting for iPad trust");
         break;
     case capture::CaptureSession::State::StartingCapture:
-        statusText_ = QStringLiteral("Starting USB Gaming Mode");
+        statusText_ = QStringLiteral("Starting Apple-supported USB capture");
+        break;
+    case capture::CaptureSession::State::ReceiverReady:
+        statusText_ = QStringLiteral("USB capture ready - waiting for video");
         break;
     case capture::CaptureSession::State::Streaming:
         streaming_ = true;
         errorText_.clear();
-        statusText_ = QStringLiteral("USB Gaming Mode active");
+        statusText_ = QStringLiteral("USB streaming");
         break;
     case capture::CaptureSession::State::Recovering:
-        streaming_ = false;
-        statusText_ = QStringLiteral("USB interrupted - reconnecting");
+        statusText_ = QStringLiteral("USB reconnecting");
         break;
     }
     emit stateChanged();
 }
 
-void AppController::handleLanLogLine(const QString& line) {
-    if (settings_.connectionMode() != Settings::ConnectionMode::AirPlayWifi || !active_) return;
-
-    if (line.contains(QStringLiteral("Begin streaming to GStreamer video pipeline"),
-                      Qt::CaseInsensitive)) {
-        streaming_ = true;
+void AppController::updateAirPlayStreaming() {
+    if (!active_ || settings_.connectionMode() != Settings::ConnectionMode::AirPlayWifi) {
+        return;
+    }
+    // Treat decoded frames as the truth signal: video is decoding and rendering
+    // into the D3D11 host window, so the WaitingView should give way. Fall back
+    // to false only after the pipeline is torn down (decodedFrames resets to 0
+    // on stop()/reset()).
+    const bool live = metrics_.decodedFrames() > 0;
+    if (live == streaming_) return;
+    streaming_ = live;
+    if (streaming_) {
         errorText_.clear();
         statusText_ = QStringLiteral("AirPlay streaming");
-        emit stateChanged();
-        return;
+        metrics_.setTransportState(QStringLiteral("Streaming"));
+    } else {
+        statusText_ = QStringLiteral("Choose PadMirror-PC in iPad Screen Mirroring");
+        metrics_.setTransportState(QStringLiteral("Waiting"));
     }
-    if (line.contains(QStringLiteral("raop_rtp_mirror->running is no longer true"),
-                      Qt::CaseInsensitive)) {
-        streaming_ = false;
-        metrics_.reset();
-        statusText_ = lanReceiver_.running()
-            ? QStringLiteral("Choose PadMirror in iPad Screen Mirroring")
-            : QStringLiteral("Preparing AirPlay receiver");
-        emit stateChanged();
-        return;
-    }
-    if (!streaming_ && line.contains(QStringLiteral("Accepted IPv4 client"),
-                                     Qt::CaseInsensitive)) {
-        statusText_ = QStringLiteral("iPad connected - waiting for video");
-        emit stateChanged();
-    }
-}
-
-void AppController::setError(const QString& message) {
-    errorText_ = message;
     emit stateChanged();
 }
 
@@ -341,6 +269,11 @@ void AppController::publishMediaError(const std::string& message) {
     QMetaObject::invokeMethod(this, [guard, text] {
         if (guard) guard->setError(text);
     }, Qt::QueuedConnection);
+}
+
+void AppController::setError(const QString& message) {
+    errorText_ = message;
+    emit stateChanged();
 }
 
 void AppController::updateWindowFlags() {

@@ -37,7 +37,13 @@ void messageHandler(QtMsgType type, const QMessageLogContext&, const QString& me
         logFile->write(line.toUtf8());
         logFile->flush();
     }
-    std::fputs(line.toLocal8Bit().constData(), stderr);
+    // Keep normal operation quiet when PadMirror is launched from a console.
+    // The complete stream remains in the log file; set PADMIRROR_VERBOSE_LOG=1
+    // when live informational output is needed for diagnostics.
+    const bool verboseConsole = qEnvironmentVariableIntValue("PADMIRROR_VERBOSE_LOG") > 0;
+    if (verboseConsole || type >= QtWarningMsg || type == QtFatalMsg) {
+        std::fputs(line.toLocal8Bit().constData(), stderr);
+    }
     if (type == QtFatalMsg) std::abort();
 }
 
@@ -50,6 +56,18 @@ void installLogging() {
     logFile = std::make_unique<QFile>(directoryPath + QStringLiteral("/padmirror.log"));
     logFile->open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text);
     qInstallMessageHandler(messageHandler);
+
+    // This is a WIN32 GUI subsystem app, so anything written to stderr (the
+    // GStreamer default log sink, plus PadMirror's own pipeline bus diagnostics
+    // such as the [audio-eld] burst-governor lines) is otherwise discarded --
+    // there is no attached console. Always redirect stderr to a dedicated file
+    // so those native-layer diagnostics can be inspected after a session. This
+    // is safe by default: GStreamer only emits to stderr at WARNING/ERROR unless
+    // GST_DEBUG is set, so the file does not grow unboundedly in normal use.
+    {
+        const auto gstLogPath = directoryPath + QStringLiteral("/gstreamer.log");
+        std::freopen(gstLogPath.toLocal8Bit().constData(), "a", stderr);
+    }
 }
 
 } // namespace padmirror::app

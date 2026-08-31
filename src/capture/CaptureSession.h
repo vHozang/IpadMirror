@@ -1,19 +1,18 @@
 #pragma once
 
-#include <QByteArray>
 #include <QObject>
-#include <QProcess>
 #include <QString>
 
-#include <atomic>
-#ifndef _WIN32
 #include "capture/usb/QuickTimeProtocol.h"
 #include "capture/usb/UsbTransport.h"
-#include <thread>
-#endif
 
-namespace padmirror::media {
-class MediaSession;
+#include <atomic>
+#include <chrono>
+#include <mutex>
+#include <thread>
+
+namespace padmirror::core {
+class IMediaIngress;
 }
 
 namespace padmirror::capture {
@@ -27,12 +26,13 @@ public:
         DeviceFound,
         Pairing,
         StartingCapture,
+        ReceiverReady,
         Streaming,
         Recovering,
     };
     Q_ENUM(State)
 
-    explicit CaptureSession(media::MediaSession* mediaSession, QObject* parent = nullptr);
+    explicit CaptureSession(core::IMediaIngress* mediaIngress, QObject* parent = nullptr);
     ~CaptureSession() override;
 
     void start(const QString& serial);
@@ -43,34 +43,24 @@ signals:
     void stateChanged(padmirror::capture::CaptureSession::State state);
     void errorOccurred(const QString& message);
     void statusOccurred(const QString& message);
-    void wifiFallbackRequested(const QString& message);
 
 private:
     void publishState(State state);
     void publishError(const std::string& message);
-#ifdef _WIN32
-    void consumeBridgeOutput();
-    void consumeBridgeErrors();
-    void handleBridgeLine(const QByteArray& line);
-    [[nodiscard]] QString bridgeProgram() const;
-#else
-    bool waitBackoff() const;
-#endif
+    void publishErrorRateLimited(const std::string& message);
+    bool waitBackoff(std::chrono::milliseconds delay) const;
 
-    media::MediaSession* mediaSession_ = nullptr;
-#ifdef _WIN32
-    QProcess bridgeProcess_;
-    QByteArray bridgeOutput_;
-    QByteArray bridgeErrors_;
-    QString selectedSerial_;
-    bool bridgeFatalError_ = false;
-#else
+    core::IMediaIngress* mediaIngress_ = nullptr;
     usb::UsbTransport transport_;
     usb::QuickTimeProtocol protocol_;
     std::thread worker_;
-#endif
     std::atomic_bool stopRequested_{false};
     std::atomic_bool running_{false};
+    std::atomic_bool receiverReadyReported_{false};
+    std::atomic_bool videoReported_{false};
+    mutable std::mutex errorMutex_;
+    std::string lastError_;
+    std::chrono::steady_clock::time_point lastErrorAt_{};
 };
 
 } // namespace padmirror::capture

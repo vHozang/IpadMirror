@@ -1,9 +1,9 @@
 #pragma once
 
-#include "capture/MediaPacket.h"
+#include "core/MirrorTypes.h"
 
-#include <cstdint>
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -30,12 +30,13 @@ public:
 
     bool start(
         const app::Settings& settings,
-        capture::VideoCodec codec,
+        core::VideoCodec codec,
         std::uintptr_t windowHandle,
         diagnostics::Metrics* metrics,
         ErrorHandler errorHandler);
     void stop();
-    bool push(capture::VideoPacket packet);
+    bool push(core::EncodedVideoPacket packet);
+    void flush();
     void setWindowHandle(std::uintptr_t windowHandle);
     [[nodiscard]] bool running() const;
 
@@ -51,7 +52,12 @@ private:
     std::thread busThread_;
     std::atomic_bool busStopRequested_{false};
     std::uintptr_t windowHandle_ = 0;
-    capture::VideoCodec codec_ = capture::VideoCodec::H264;
+    core::VideoCodec codec_ = core::VideoCodec::H264;
+    std::uint64_t sourcePtsAnchor_ = 0;
+    std::uint64_t runningPtsAnchor_ = 0;
+    std::uint64_t lastVideoPts_ = 0;
+    std::uint64_t initialLeadNs_ = 30 * 1'000'000ULL;
+    bool videoTimelineInitialized_ = false;
 };
 
 } // namespace padmirror::media

@@ -1,13 +1,12 @@
 #pragma once
 
-#include "capture/MediaPacket.h"
+#include "core/IMediaIngress.h"
 #include "media/AudioPipeline.h"
-#include "media/LanPipeline.h"
+#include "media/MediaEngine.h"
 #include "media/VideoPipeline.h"
 
 #include <QVariantList>
 
-#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -22,46 +21,37 @@ class Metrics;
 
 namespace padmirror::media {
 
-class MediaSession {
+class MediaSession final : public core::IMediaIngress {
 public:
-    enum class Mode {
-        Stopped,
-        Usb,
-        Lan,
-    };
-
     using ErrorHandler = std::function<void(const std::string&)>;
 
     MediaSession();
     ~MediaSession();
 
-    bool startUsb(
+    bool start(
         const app::Settings& settings,
-        capture::VideoCodec videoCodec,
-        capture::AudioCodec audioCodec,
-        std::uintptr_t windowHandle,
-        diagnostics::Metrics* metrics,
-        ErrorHandler errorHandler);
-    bool startLan(
-        const app::Settings& settings,
-        std::uint16_t videoPort,
-        std::uint16_t audioPort,
+        core::VideoCodec videoCodec,
+        core::AudioCodec audioCodec,
         std::uintptr_t windowHandle,
         diagnostics::Metrics* metrics,
         ErrorHandler errorHandler);
     void stop();
-    void pushVideo(capture::VideoPacket packet);
-    void pushAudio(capture::AudioPacket packet);
     void setWindowHandle(std::uintptr_t windowHandle);
+    [[nodiscard]] bool running() const;
 
-    [[nodiscard]] Mode mode() const;
+    bool pushVideo(core::EncodedVideoPacket packet) override;
+    bool pushAudio(core::EncodedAudioPacket packet) override;
+    std::uint64_t signalDiscontinuity(core::DiscontinuityReason reason) override;
+    void endOfStream() override;
+
+    [[nodiscard]] std::uint64_t activeEpoch() const;
+    [[nodiscard]] static bool hevcAvailable();
     static QVariantList audioDevices();
 
 private:
     VideoPipeline videoPipeline_;
     AudioPipeline audioPipeline_;
-    LanPipeline lanPipeline_;
-    std::atomic<Mode> mode_{Mode::Stopped};
+    MediaEngine engine_;
 };
 
 } // namespace padmirror::media

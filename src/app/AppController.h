@@ -1,16 +1,16 @@
 #pragma once
 
+#include "airplay/AirPlayBackend.h"
+#include "app/MirrorCoordinator.h"
 #include "app/Settings.h"
 #include "capture/CaptureSession.h"
+#include "capture/usb/UsbMirrorBackend.h"
 #include "device/DeviceManager.h"
 #include "diagnostics/Metrics.h"
 #include "media/MediaSession.h"
-#include "network/LanReceiver.h"
 
 #include <QObject>
 #include <QString>
-#include <QStringList>
-#include <QTimer>
 #include <QVariantList>
 
 #include <cstdint>
@@ -29,14 +29,13 @@ class AppController final : public QObject {
     Q_PROPERTY(QString connectionLabel READ connectionLabel NOTIFY stateChanged)
     Q_PROPERTY(QVariantList audioDevices READ audioDevices NOTIFY audioDevicesChanged)
     Q_PROPERTY(bool wifiAvailable READ wifiAvailable NOTIFY stateChanged)
-    Q_PROPERTY(QStringList wifiAddresses READ wifiAddresses CONSTANT)
 
 public:
     explicit AppController(QObject* parent = nullptr);
     ~AppController() override;
 
     void setMainWindow(MainWindow* window);
-    void setVideoWindowHandle(std::uintptr_t handle);
+    void setVideoWindowHandle(std::uintptr_t windowHandle);
 
     [[nodiscard]] Settings* settings();
     [[nodiscard]] device::DeviceManager* devices();
@@ -49,18 +48,19 @@ public:
     [[nodiscard]] QString connectionLabel() const;
     [[nodiscard]] QVariantList audioDevices() const;
     [[nodiscard]] bool wifiAvailable() const;
-    [[nodiscard]] QStringList wifiAddresses() const;
 
 public slots:
     void start();
     void stop();
     void restart();
+    void applySettings();
     void refreshAudioDevices();
     void minimizeWindow();
     void toggleMaximize();
     void closeWindow();
     void toggleFullscreen();
     void beginWindowMove();
+    void showStreamingSettings();
 
 signals:
     void stateChanged();
@@ -68,11 +68,13 @@ signals:
 
 private:
     void startUsb();
-    void startWifi();
+    void startAirPlay();
+    bool armMedia();
+    [[nodiscard]] QString airPlayQualityLabel() const;
     void handleCaptureState(capture::CaptureSession::State state);
-    void handleLanLogLine(const QString& line);
-    void setError(const QString& message);
+    void updateAirPlayStreaming();
     void publishMediaError(const std::string& message);
+    void setError(const QString& message);
     void updateWindowFlags();
 
     Settings settings_;
@@ -80,18 +82,18 @@ private:
     diagnostics::Metrics metrics_;
     media::MediaSession mediaSession_;
     capture::CaptureSession captureSession_;
-    network::LanReceiver lanReceiver_;
+    capture::usb::UsbMirrorBackend usbBackend_;
+    airplay::AirPlayBackend airPlayBackend_;
+    MirrorCoordinator coordinator_;
     MainWindow* mainWindow_ = nullptr;
     std::uintptr_t videoWindowHandle_ = 0;
+    core::VideoCodec pendingVideoCodec_ = core::VideoCodec::H264;
+    core::AudioCodec pendingAudioCodec_ = core::AudioCodec::PcmS16Le;
     QString statusText_ = QStringLiteral("Ready");
     QString errorText_;
     QVariantList audioDevices_;
     bool active_ = false;
     bool streaming_ = false;
-    bool usbDriverInstallInProgress_ = false;
-    QTimer lanMetricsTimer_;
-    static constexpr std::uint16_t kLanVideoPort = 50100;
-    static constexpr std::uint16_t kLanAudioPort = 50102;
 };
 
 } // namespace padmirror::app

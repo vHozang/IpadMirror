@@ -1,0 +1,92 @@
+diff --git a/lib/netutils.c b/lib/netutils.c
+index 726ab13..e5306e2 100644
+--- a/lib/netutils.c
++++ b/lib/netutils.c
+@@ -16,6 +16,7 @@
+  */
+ 
+ #include <stdlib.h>
++#include <stdio.h>
+ #include <string.h>
+ #include <assert.h>
+ 
+@@ -52,6 +53,43 @@ netutils_cleanup()
+ #endif
+ }
+ 
++void
++netutils_padmirror_relay_register(unsigned short local_port, unsigned short remote_port)
++{
++    const char *configured_port = getenv("PADMIRROR_USB_RELAY_CONTROL_PORT");
++    struct sockaddr_in relay;
++    char message[64];
++    char *end = NULL;
++    long relay_port;
++    int fd;
++    int length;
++
++    if (!configured_port || configured_port[0] == '\0' ||
++        local_port == 0 || remote_port == 0) {
++        return;
++    }
++    relay_port = strtol(configured_port, &end, 10);
++    if (!end || *end != '\0' || relay_port <= 0 || relay_port > 65535) {
++        return;
++    }
++
++    fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
++    if (fd == -1) {
++        return;
++    }
++    memset(&relay, 0, sizeof(relay));
++    relay.sin_family = AF_INET;
++    relay.sin_port = htons((unsigned short) relay_port);
++    relay.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
++    length = snprintf(message, sizeof(message), "PMAP %u %u",
++                      local_port, remote_port);
++    if (length > 0 && length < (int) sizeof(message)) {
++        sendto(fd, message, length, 0,
++               (struct sockaddr *) &relay, sizeof(relay));
++    }
++    CLOSESOCKET(fd);
++}
++
+ unsigned char *
+ netutils_get_address(void *sockaddr, int *length, unsigned int *zone_id, unsigned short *port)
+ {
+diff --git a/lib/netutils.h b/lib/netutils.h
+index d6b7542..a74a628 100644
+--- a/lib/netutils.h
++++ b/lib/netutils.h
+@@ -19,6 +19,7 @@ int netutils_init();
+ void netutils_cleanup();
+ 
+ int netutils_init_socket(unsigned short *port, int use_ipv6, int use_udp);
++void netutils_padmirror_relay_register(unsigned short local_port, unsigned short remote_port);
+ unsigned char *netutils_get_address(void *sockaddr, int *length, unsigned int *zone_id, unsigned short *port);
+ int netutils_parse_address(int family, const char *src, void *dst, int dstlen);
+ 
+diff --git a/lib/raop_ntp.c b/lib/raop_ntp.c
+index 581215f..254a262 100644
+--- a/lib/raop_ntp.c
++++ b/lib/raop_ntp.c
+@@ -383,5 +383,6 @@ raop_ntp_init_socket(raop_ntp_t *raop_ntp, int use_ipv6)
+     /* Set port values */
+     raop_ntp->timing_lport = tport;
++    netutils_padmirror_relay_register(tport, raop_ntp->timing_rport);
+     logger_log(raop_ntp->logger, LOGGER_DEBUG, "raop_ntp local timing port socket %d port UDP %d", tsock, tport);
+     return 0;
+ 
+diff --git a/lib/raop_rtp.c b/lib/raop_rtp.c
+index 41f8f91..fb1623a 100644
+--- a/lib/raop_rtp.c
++++ b/lib/raop_rtp.c
+@@ -680,6 +680,8 @@ raop_rtp_start_audio(raop_rtp_t *raop_rtp,  unsigned short *control_rport, unsig
+         MUTEX_UNLOCK(raop_rtp->run_mutex);
+         return;
+     }
++    netutils_padmirror_relay_register(
++        raop_rtp->control_lport, raop_rtp->control_rport);
+     *control_lport = raop_rtp->control_lport;
+     *data_lport = raop_rtp->data_lport;
+     /* Create the thread and initialize running values */

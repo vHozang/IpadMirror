@@ -1,24 +1,14 @@
-# QuickTime USB protocol notes
+# QuickTime protocol notes
 
-Backend này chỉ dùng cho nền tảng non-Windows/legacy và các bài test protocol. Bản Windows dùng Apple Mobile Device Service + RemoteXPC user-space để tránh kernel capture driver và `WDF_VIOLATION`.
+File này ghi lại phần **protocol và parser** QuickTime đang được triển khai, độc lập
+với transport. Nó chỉ mô tả state machine, packet parsing và fixture để test; **không**
+mô tả device control, configuration switching, interface claim, bulk-endpoint binding
+hay bất kỳ thao tác driver nào. Việc mở kênh AV do Apple runtime đảm nhận (xem
+`docs/usb-setup.md`); nếu không có kênh an toàn, USB báo `USB_CAPTURE_UNSUPPORTED`.
 
-File này ghi lại đúng phần protocol đang được triển khai, không cố mô tả các dịch vụ iOS khác.
-
-## Kích hoạt transport
-
-1. Tìm thiết bị Apple vendor ID `0x05ac` có usbmux hoặc QuickTime configuration.
-2. Nếu QuickTime configuration chưa xuất hiện, gửi vendor control request:
-
-```text
-bmRequestType = 0x40
-bRequest      = 0x52
-wValue        = 0
-wIndex        = 2
-```
-
-3. Chờ iPad disconnect/reconnect.
-4. Chọn configuration có interface class `0xff`, subclass `0x2a`.
-5. Claim bulk IN/OUT endpoints và đọc stream theo frame length little-endian 32-bit.
+`QuickTimeProtocol` và `PacketParser` được cô lập trong `src/capture/usb/` để có thể
+thay thế khi Apple thay đổi iPadOS, và để tái sử dụng như một bộ parser thuần khi
+chuyển output sang packet contract dùng chung (`EncodedVideoPacket`/`EncodedAudioPacket`).
 
 ## Session handshake
 
@@ -33,13 +23,15 @@ iPad -> SYNC AFMT/SKEW    PadMirror -> audio format / effective clock-rate repli
 
 `SKEW` trả effective audio clock rate gần `48000`, không phải ratio gần `1.0`.
 
-## Media
+## Media parsing
 
 - `ASYN FEED` chứa video `CMSampleBuffer`.
 - `ASYN EAT!` chứa audio `CMSampleBuffer`.
 - H.264 AVCC được đổi sang Annex B; SPS/PPS được chèn khi format description thay đổi.
 - Audio hiện hỗ trợ Linear PCM S16LE, mặc định 48 kHz stereo.
 - Sau mỗi video `FEED`, PadMirror gửi lại `NEED` để giữ stream chạy.
+- Thay đổi format description (video hoặc audio) và bước nhảy PTS được parser phát hiện
+  và ánh xạ sang discontinuity của packet contract.
 
 ## Shutdown
 
@@ -47,6 +39,13 @@ iPad -> SYNC AFMT/SKEW    PadMirror -> audio format / effective clock-rate repli
 2. Gửi `HPD0` với empty clock reference.
 3. Trả lời `SYNC STOP`.
 4. Chờ hai `ASYN RELS` tối đa 400 ms.
-5. Gửi `HPD0` lần cuối, release interface, tắt QuickTime configuration và quay lại usbmux configuration.
+5. Gửi `HPD0` lần cuối và kết thúc session.
 
-Protocol được cô lập trong `src/capture/usb/QuickTimeProtocol.*` để có thể thay thế khi Apple thay đổi iPadOS.
+## Test fixtures
+
+Các fixture protocol dùng để kiểm tra thuần parser, không cần thiết bị thật:
+
+- Packet length/caps bounds.
+- AVCC -> Annex B, thay đổi SPS/PPS.
+- Handshake, clock reply, `NEED`, và close/release ordering.
+- Ánh xạ format/PTS change sang discontinuity reason.

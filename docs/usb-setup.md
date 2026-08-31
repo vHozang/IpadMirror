@@ -2,37 +2,40 @@
 
 ## Windows 10/11 x64
 
-PadMirror chỉ dùng stack USB chính chủ của Apple: Apple Devices, Apple Mobile Device Service, pairing/trust và RemoteXPC user-space. Bản Windows không mở iPad bằng raw `libusb` và không cần kernel capture driver.
+PadMirror giữ **nguyên** stack USB chính chủ của Apple (composite, pairing, usbmux).
+App **không** cài, thay thế, rebind hay filter driver Apple: không rebind `MI_02`
+sang WinUSB, không libusb, UsbDk, Zadig, không Python bridge, không Developer Mode
+hoặc Developer Disk Image. USB capture chỉ chạy khi Apple runtime tự cung cấp một
+kênh AV user-mode an toàn.
 
-Apple chỉ cho phép `DisplayService` truyền video USB từ iPadOS 27. Nếu iPad đang chạy iPadOS 26, PadMirror tự chuyển sang receiver AirPlay Wi-Fi trên cùng mạng; ứng dụng không hạ cấp về UsbDk để tránh tái diễn màn hình xanh.
+1. Cài **Apple Devices** (hoặc Apple Mobile Device Support) từ Microsoft Store.
+2. Cắm iPad bằng cáp data, mở khóa và chọn **Trust This Computer** (nhập passcode nếu
+   iPad yêu cầu).
+3. Mở PadMirror và chọn `USB Gaming`.
 
-1. Cài **Apple Devices** từ Microsoft Store.
-2. Cắm iPad bằng cáp data, mở khóa và chọn **Trust This Computer**.
-3. Trên iPad, bật `Settings -> Privacy & Security -> Developer Mode`, restart iPad và xác nhận bật Developer Mode.
-4. Giữ `Apple Mobile Device USB Composite Device` dùng driver Apple mặc định.
-5. Mở PadMirror và chọn `USB Gaming`.
+Khi bắt đầu, PadMirror chạy một **capability probe không xâm lấn**: kiểm tra Apple
+runtime/AMDS, trạng thái Trust qua Lockdown handshake, và hỏi xem Apple stack có expose
+sẵn kênh AV user-mode tương thích hay không. Probe này **chỉ đọc**, không gọi installer
+INF, không `WinUsb_Initialize`, không `SetupDiInstallDevice`, không đổi configuration
+hay claim interface.
 
-Lần chạy đầu, PadMirror kiểm tra Apple Mobile Device Service và USB bridge đi kèm. Nếu Apple Devices còn thiếu, app dùng `winget` để mở luồng cài chính chủ. Bridge tự tải/mount Developer Disk Image phù hợp với iPadOS khi bắt đầu capture.
+## Khi không có kênh an toàn (USB_CAPTURE_UNSUPPORTED)
 
-## Bảo vệ khỏi WDF_VIOLATION
-
-Không cài UsbDk, Zadig hoặc `libusb-win32/libusb0` lên iPad. Các filter/driver này không còn được PadMirror sử dụng và có thể gây `WDF_VIOLATION` trên một số máy Windows.
-
-Nếu phát hiện bản cũ, PadMirror chạy `dependencies\remove-unsafe-usb-filter.ps1` qua UAC để:
-
-- Vô hiệu hóa và gỡ UsbDk.
-- Gỡ filter `libusb0` khỏi thiết bị Apple mà không thay driver Apple.
-- Yêu cầu restart Windows một lần nếu driver cũ đang nằm trong kernel.
-
-Không thử lại USB trước khi hoàn tất lần restart đó.
+Nếu cách duy nhất để lấy interface QuickTime là thay driver Apple, PadMirror **không**
+làm điều đó. Backend báo `USB_CAPTURE_UNSUPPORTED` và dừng sạch, không để lại thay đổi
+nào trên thiết bị hoặc driver. UI hiển thị lý do và, nếu AirPlay khả dụng, gợi ý người
+dùng chuyển sang AirPlay. USB capable hay không là một go/no-go gate, không có fallback
+"cố làm cho chạy" bằng driver thay thế.
 
 ## Trình tự chạy
 
 1. Cắm iPad trực tiếp vào máy, tránh hub trong lần thử đầu.
-2. Mở khóa iPad; đóng 3uAirPlayer hoặc app mirror khác.
-3. Chọn `USB Gaming` trong PadMirror.
-4. Chờ trạng thái `Preparing Apple's Developer Disk Image`, rồi `USB Gaming Mode active`.
-5. Nếu rút cáp, cắm lại và mở khóa iPad để app kết nối lại.
+2. Mở khóa iPad và Trust This Computer.
+3. Chọn `USB Gaming` trong PadMirror; khi thiết bị trusted xuất hiện và app đang ở USB
+   mode, capture tự start.
+4. Chờ trạng thái streaming; hình và tiếng xuất hiện tự động.
+5. Nếu rút cáp, cắm lại và mở khóa iPad; backend tạo session mới với epoch mới, không
+   cần restart app.
 
 Log Windows: `%LOCALAPPDATA%\PadMirror\PadMirror\logs\padmirror.log`.
 
@@ -40,12 +43,8 @@ Log Windows: `%LOCALAPPDATA%\PadMirror\PadMirror\logs\padmirror.log`.
 
 | Thông báo | Cách xử lý |
 | --- | --- |
-| No iPad was found through Apple Devices | Đổi cáp/cổng, mở khóa iPad, kiểm tra Apple Devices có nhìn thấy máy |
+| No iPad was found | Đổi cáp/cổng, mở khóa iPad, kiểm tra Apple Devices/AMDS có nhìn thấy máy |
 | Trust This Computer | Chọn Trust trên iPad, nhập passcode rồi rút/cắm lại cáp |
-| Enable Developer Mode | Bật Developer Mode, restart iPad và xác nhận sau khi máy lên |
-| Developer Disk Image setup failed | Kiểm tra Internet, ngày giờ Windows và thử lại |
-| Apple DisplayService is unavailable | Xác nhận Developer Mode đã bật, rút/cắm lại iPad |
-| Safe USB video requires iPadOS 27 | App tự chuyển sang AirPlay Wi-Fi; chọn `PadMirror` trong Screen Mirroring |
-| UsbDk was disabled and is pending removal | Restart Windows một lần rồi mở lại PadMirror |
-| HEVC decoder is unavailable | Cập nhật driver GPU hoặc chạy lại installer để repair GStreamer |
-| Audio device unavailable | Chọn lại DAC, rút/cắm DAC rồi restart receiver |
+| USB_CAPTURE_UNSUPPORTED | Apple runtime không mở được kênh AV an toàn trên máy/iPadOS này; dùng AirPlay khi khả dụng. PadMirror không thay driver để ép chạy |
+| Apple runtime missing | Cài/mở lại Apple Devices (AMDS), rồi thử lại USB |
+| Audio device unavailable | Chọn lại DAC, rút/cắm DAC rồi thử lại |

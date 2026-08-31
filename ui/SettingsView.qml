@@ -6,8 +6,8 @@ import QtQuick.Layouts
 
 Rectangle {
     id: root
-    property var appController
-    property var settingsObject
+    property var appController: app
+    property var settingsObject: settings
     property color accentColor: "#b7f34a"
     signal closeRequested()
 
@@ -56,7 +56,6 @@ Rectangle {
         }
 
         ScrollView {
-            id: settingsScroll
             Layout.fillWidth: true
             Layout.fillHeight: true
             clip: true
@@ -73,32 +72,56 @@ Rectangle {
                 SectionTitle { text: "CONNECTION" }
                 FieldLabel { text: "Mode" }
                 ComboBox {
-                    id: audioBufferCombo
                     Layout.fillWidth: true
                     model: ["USB Gaming", "AirPlay Wi-Fi"]
                     currentIndex: root.settingsObject.connectionMode
                     onActivated: root.settingsObject.connectionMode = currentIndex
                 }
-
-                FieldLabel { text: "UxPlay executable"; visible: root.settingsObject.connectionMode === 1 }
-                TextField {
+                Text {
                     Layout.fillWidth: true
-                    visible: root.settingsObject.connectionMode === 1
-                    text: root.settingsObject.uxplayPath
-                    placeholderText: "Auto-detect or C:/msys64/ucrt64/bin/uxplay.exe"
-                    onEditingFinished: root.settingsObject.uxplayPath = text
+                    text: root.settingsObject.connectionMode === 0
+                          ? "USB uses only an Apple-supported user-mode AV channel. PadMirror will never change, rebind, or filter an Apple USB driver."
+                          : "AirPlay runs in PadMirror when the native receiver and Bonjour runtime are available. Select PadMirror-PC from iPad Control Center."
+                    color: "#758187"
+                    wrapMode: Text.WordWrap
+                    font.family: "Bahnschrift"
+                    font.pixelSize: 10
+                }
+
+                FieldLabel { text: "AirPlay source quality" }
+                ComboBox {
+                    Layout.fillWidth: true
+                    model: ["Auto", "1080p60"]
+                    currentIndex: root.settingsObject.airPlayQuality
+                    onActivated: root.settingsObject.airPlayQuality = currentIndex
                 }
 
                 SectionTitle { text: "VIDEO" }
                 FieldLabel { text: "Hardware decoder" }
                 ComboBox {
                     Layout.fillWidth: true
-                    model: ["Auto", "D3D11", "VideoToolbox"]
+                    model: ["Auto", "D3D11"]
                     currentIndex: Math.max(0, model.indexOf(root.settingsObject.hardwareDecoder))
                     onActivated: root.settingsObject.hardwareDecoder = currentText
                 }
-                CheckBox { text: "Drop stale frames"; checked: root.settingsObject.dropStaleFrames; onToggled: root.settingsObject.dropStaleFrames = checked }
-                CheckBox { text: "Gaming Mode"; checked: root.settingsObject.gamingMode; onToggled: root.settingsObject.gamingMode = checked }
+                CheckBox {
+                    text: "Drop stale frames"
+                    checked: root.settingsObject.dropStaleFrames
+                    onToggled: root.settingsObject.dropStaleFrames = checked
+                }
+                CheckBox {
+                    text: "Gaming Mode"
+                    checked: root.settingsObject.gamingMode
+                    onToggled: root.settingsObject.gamingMode = checked
+                }
+                Text {
+                    Layout.fillWidth: true
+                    text: "The renderer preserves aspect ratio and always favors the newest available frame. PadMirror does not interpolate or fabricate 60 FPS."
+                    color: "#758187"
+                    wrapMode: Text.WordWrap
+                    font.family: "Bahnschrift"
+                    font.pixelSize: 10
+                }
 
                 SectionTitle { text: "AUDIO" }
                 FieldLabel { text: "Output" }
@@ -116,8 +139,9 @@ Rectangle {
                 }
                 FieldLabel { text: "Buffer" }
                 ComboBox {
+                    id: audioBufferCombo
                     Layout.fillWidth: true
-                    model: [5, 10, 15, 20]
+                    model: [5, 8, 10, 20, 35]
                     currentIndex: model.indexOf(root.settingsObject.audioBufferMs)
                     displayText: currentText + " ms"
                     delegate: ItemDelegate {
@@ -127,30 +151,53 @@ Rectangle {
                     }
                     onActivated: root.settingsObject.audioBufferMs = Number(currentText)
                 }
-                FieldLabel { text: "Windows audio mode" }
+                FieldLabel { text: "WASAPI mode" }
                 ComboBox {
                     Layout.fillWidth: true
                     model: ["Low latency", "Exclusive", "Safe / compatible"]
                     currentIndex: root.settingsObject.audioMode
                     onActivated: root.settingsObject.audioMode = currentIndex
                 }
-                CheckBox { text: "Strict sync to video"; checked: root.settingsObject.strictSync; onToggled: root.settingsObject.strictSync = checked }
+                Text {
+                    Layout.fillWidth: true
+                    text: "Audio stays at 48 kHz. The live buffer is capped at 35 ms and discards obsolete samples rather than accumulating delay."
+                    color: "#758187"
+                    wrapMode: Text.WordWrap
+                    font.family: "Bahnschrift"
+                    font.pixelSize: 10
+                }
 
                 SectionTitle { text: "DISPLAY" }
-                CheckBox { text: "Maintain aspect ratio"; checked: root.settingsObject.maintainAspectRatio; onToggled: root.settingsObject.maintainAspectRatio = checked }
-                CheckBox { text: "Fullscreen on launch"; checked: root.settingsObject.fullscreenOnLaunch; onToggled: root.settingsObject.fullscreenOnLaunch = checked }
-                CheckBox { text: "Always on top"; checked: root.settingsObject.alwaysOnTop; onToggled: root.settingsObject.alwaysOnTop = checked }
+                CheckBox {
+                    text: "Maintain aspect ratio"
+                    checked: root.settingsObject.maintainAspectRatio
+                    onToggled: root.settingsObject.maintainAspectRatio = checked
+                }
+                CheckBox {
+                    text: "Fullscreen on launch"
+                    checked: root.settingsObject.fullscreenOnLaunch
+                    onToggled: root.settingsObject.fullscreenOnLaunch = checked
+                }
+                CheckBox {
+                    text: "Always on top"
+                    checked: root.settingsObject.alwaysOnTop
+                    onToggled: root.settingsObject.alwaysOnTop = checked
+                }
 
-                SectionTitle { text: "DEBUG" }
-                CheckBox { text: "Diagnostics overlay"; checked: root.settingsObject.diagnosticsVisible; onToggled: root.settingsObject.diagnosticsVisible = checked }
+                SectionTitle { text: "DIAGNOSTICS" }
+                CheckBox {
+                    text: "Diagnostics overlay"
+                    checked: root.settingsObject.diagnosticsVisible
+                    onToggled: root.settingsObject.diagnosticsVisible = checked
+                }
 
                 Button {
                     id: applyButton
                     Layout.fillWidth: true
                     Layout.topMargin: 10
-                    text: "APPLY AND RESTART RECEIVER"
+                    text: "APPLY SETTINGS"
                     onClicked: {
-                        root.appController.restart()
+                        root.appController.applySettings()
                         root.closeRequested()
                     }
                     contentItem: Text {
@@ -165,7 +212,6 @@ Rectangle {
                     }
                     background: Rectangle { implicitHeight: 44; color: root.accentColor; radius: 5 }
                 }
-
             }
         }
     }
@@ -173,7 +219,6 @@ Rectangle {
     component SectionTitle: Text {
         Layout.fillWidth: true
         Layout.topMargin: 9
-        text: ""
         color: root.accentColor
         font.family: "Bahnschrift"
         font.pixelSize: 11

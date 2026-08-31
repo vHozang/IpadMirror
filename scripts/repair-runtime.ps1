@@ -76,9 +76,8 @@ if ($ForceGStreamer -or -not $gstreamerReady) {
     New-Item -ItemType Directory -Force -Path $pluginTarget | Out-Null
     foreach ($plugin in @(
         "gstapp.dll", "gstcoreelements.dll", "gstvideoparsersbad.dll",
-        "gstaudioconvert.dll", "gstaudioresample.dll", "gstudp.dll",
-        "gstrtpmanager.dll", "gstrtp.dll", "gstd3d11.dll", "gstnvcodec.dll",
-        "gstlibav.dll",
+        "gstaudioconvert.dll", "gstaudioresample.dll", "gstd3d11.dll",
+        "gstnvcodec.dll", "gstlibav.dll",
         "gstwasapi2.dll", "gstwasapi.dll"
     )) {
         Copy-Item (Join-Path $installedRoot "lib\gstreamer-1.0\$plugin") $pluginTarget -Force

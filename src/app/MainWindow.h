@@ -1,45 +1,44 @@
 #pragma once
 
+#include "airplay/UxPlayReceiver.h"
+
 #include <QWidget>
 
-#include <cstdint>
+#include <memory>
 
-class QQuickWidget;
 class QLabel;
-class QStackedLayout;
+class QStackedWidget;
+class QKeyEvent;
+class QCloseEvent;
+class QShowEvent;
 
 namespace padmirror::app {
-
-class AppController;
 
 class MainWindow final : public QWidget {
     Q_OBJECT
 
 public:
-    explicit MainWindow(AppController* controller, QWidget* parent = nullptr);
-    ~MainWindow() override = default;
+    explicit MainWindow(QWidget* parent = nullptr);
+    ~MainWindow() override;
 
-    void toggleFullscreen();
-    void beginSystemMove();
-    void setAlwaysOnTop(bool enabled);
+    void startReceiver();
 
 protected:
-    void showEvent(QShowEvent* event) override;
     void closeEvent(QCloseEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;
-    bool eventFilter(QObject* watched, QEvent* event) override;
+    void showEvent(QShowEvent* event) override;
 
 private:
-    void updateLayerVisibility();
-    void updateStreamStatus();
+    void applyReceiverState(airplay::ReceiverState state, const QString& detail);
+    void toggleFullscreen();
 
-    AppController* controller_ = nullptr;
-    QStackedLayout* pages_ = nullptr;
-    QWidget* videoPage_ = nullptr;
     QWidget* videoHost_ = nullptr;
-    QWidget* streamBar_ = nullptr;
-    QLabel* streamStatus_ = nullptr;
-    QQuickWidget* overlay_ = nullptr;
+    QWidget* statePanel_ = nullptr;
+    QLabel* stateBadge_ = nullptr;
+    QLabel* stateTitle_ = nullptr;
+    QLabel* stateDetail_ = nullptr;
+    std::unique_ptr<airplay::UxPlayReceiver> receiver_;
+    bool receiverStartRequested_ = false;
 };
 
 } // namespace padmirror::app

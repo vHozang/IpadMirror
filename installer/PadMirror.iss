@@ -6,7 +6,7 @@
 #endif
 
 #define AppName "PadMirror"
-#define AppVersion "0.1.11"
+#define AppVersion "0.1.26"
 
 [Setup]
 AppId={{475CC31D-376B-4C26-A4C1-23DF219178EE}
@@ -41,10 +41,16 @@ Source: "{#ReleaseDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
 [InstallDelete]
 Type: files; Name: "{app}\libusb0.dll"
 Type: files; Name: "{app}\libusb-1.0.dll"
+Type: files; Name: "{app}\usb-bridge\_internal\libusb0.dll"
+Type: files; Name: "{app}\usb-bridge\_internal\libusb-1.0.dll"
+Type: files; Name: "{app}\wintun.dll"
+Type: files; Name: "{app}\usb-bridge\_internal\wintun.dll"
+Type: filesandordirs; Name: "{app}\usb-bridge\_internal\pytun_pmd3\wintun"
 Type: filesandordirs; Name: "{app}\dependencies\libusb-win32"
 Type: filesandordirs; Name: "{app}\dependencies\libusb"
 Type: filesandordirs; Name: "{app}\licenses\libusb-win32"
 Type: filesandordirs; Name: "{app}\licenses\UsbDk"
+Type: filesandordirs; Name: "{app}\usb-bridge"
 
 [Icons]
 Name: "{autoprograms}\PadMirror"; Filename: "{app}\PadMirror.exe"; IconFilename: "{app}\PadMirror.exe"; IconIndex: 0; AppUserModelID: "PadMirror.Desktop"

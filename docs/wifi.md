@@ -1,74 +1,36 @@
 # Mirror khi cùng Wi-Fi
 
-Wi-Fi dùng AirPlay qua UxPlay và là đường dự phòng. USB vẫn là lựa chọn cho PUBG vì ít jitter và ít tích lũy latency hơn.
+Wi-Fi dùng AirPlay và là đường dự phòng của USB. USB vẫn là lựa chọn cho PUBG vì ít jitter và ít tích lũy latency hơn.
 
-## Yêu cầu mạng
+## Trạng thái hiện tại
+
+AirPlay Wi-Fi hiện **chưa khả dụng**. Receiver AirPlay được port trực tiếp vào `PadMirror.exe` (cùng process, dựa trên mã UxPlay GPLv3), không chạy tiến trình `uxplay.exe` ngoài và không dùng RTP relay qua loopback. Phần native này được lên lịch cho các mốc M6/M7 và chưa hoàn thiện, nên PadMirror báo AirPlay ở trạng thái `Unavailable` cho tới khi receiver native được vendored vào binary.
+
+Tới thời điểm đó, hãy dùng USB Gaming (`docs/usb-setup.md`).
+
+## Yêu cầu mạng (khi AirPlay khả dụng)
 
 - iPad và máy tính ở cùng LAN/VLAN.
 - Tắt `AP isolation`, `client isolation` hoặc guest-network isolation.
-- Windows network profile nên là `Private`; PadMirror vẫn tạo rule cho mọi profile để hoạt động khi LAN đang bị đặt là `Public`.
-- Cho phép `uxplay.exe` qua firewall trên TCP/UDP `7100-7102`.
+- Windows network profile nên là `Private`.
+- Hai thiết bị không ở guest Wi-Fi.
 
-PadMirror nhận RTP nội bộ trên loopback:
+Receiver dùng bộ port AirPlay cố định tương thích UxPlay và Bonjour/mDNS in-process; không có RTP relay nội bộ và không mở cổng relay ra LAN.
 
-- Video H.264: `127.0.0.1:50100`.
-- Audio L16: `127.0.0.1:50102`.
+## Hành vi dự kiến
 
-Hai cổng này không cần mở ra LAN.
-
-## UxPlay trên Windows
-
-Bản installer và portable đã kèm UxPlay 1.74 tại `uxplay\uxplay.exe`, các DLL/plugin MinGW cần thiết, GPLv3 và source archive đúng revision. Không cần cài MSYS2 hoặc GStreamer MinGW trên máy người dùng.
-
-Nếu tự build, UxPlay 1.74+ có mDNS tích hợp và có thể build trong MSYS2 UCRT64:
-
-```bash
-pacman -Syu
-pacman -S --needed git \
-  mingw-w64-ucrt-x86_64-gcc \
-  mingw-w64-ucrt-x86_64-cmake \
-  mingw-w64-ucrt-x86_64-ninja \
-  mingw-w64-ucrt-x86_64-libplist \
-  mingw-w64-ucrt-x86_64-gstreamer \
-  mingw-w64-ucrt-x86_64-gst-plugins-base \
-  mingw-w64-ucrt-x86_64-gst-plugins-good \
-  mingw-w64-ucrt-x86_64-gst-plugins-bad \
-  mingw-w64-ucrt-x86_64-gst-libav
-
-git clone https://github.com/FDH2/UxPlay.git
-cmake -S UxPlay -B UxPlay/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DNO_MARCH_NATIVE=ON
-cmake --build UxPlay/build
-cmake --install UxPlay/build --prefix /ucrt64
-```
-
-Release PadMirror dùng revision đã ghim kèm patch chọn đúng card LAN vật lý. Sau khi cài các package MSYS2 ở trên, chạy trong shell UCRT64:
-
-```bash
-./scripts/build-uxplay-windows.sh
-```
-
-Đường dẫn thường dùng:
-
-```text
-C:\msys64\ucrt64\bin\uxplay.exe
-```
-
-## Sử dụng
+Khi native receiver hoàn thiện, PadMirror sẽ đăng ký dịch vụ AirPlay qua Bonjour (`dns_sd`) ngay trong process với tên receiver `PadMirror-PC`. Nếu Bonjour không có trên máy, AirPlay chuyển sang `Unavailable`.
 
 1. Mở PadMirror -> Settings.
 2. Connection -> `AirPlay Wi-Fi`.
-3. Bản release tự tìm `uxplay\uxplay.exe`; chỉ nhập đường dẫn khác nếu dùng bản UxPlay riêng.
-4. Chọn `Apply and restart receiver`.
-5. Trên iPad mở Control Center -> Screen Mirroring -> `PadMirror`.
+3. Trên iPad mở Control Center -> Screen Mirroring -> `PadMirror-PC`.
 
-PadMirror chạy UxPlay với tên receiver `PadMirror`, yêu cầu tối đa 60 FPS, tắt strict A/V sync và forward H.264/L16 vào pipeline GPU/audio của ứng dụng.
+Video H.264/HEVC và audio L16 được đưa thẳng vào cùng `MediaEngine` (GStreamer + D3D11 + WASAPI) mà USB dùng. Khi USB đang streaming, kết nối AirPlay bị từ chối với trạng thái `BUSY`; cắm USB trong lúc AirPlay đang chạy chỉ hiển thị `USB AVAILABLE` chứ không tự ngắt AirPlay.
 
-## Nếu iPad không thấy PadMirror
+## Firewall
 
-1. Mở lại receiver trong PadMirror và chấp nhận cửa sổ UAC cấu hình firewall.
-2. Kiểm tra firewall, network profile và tắt guest/client isolation trên router.
-3. Đảm bảo hai thiết bị không ở guest Wi-Fi.
-4. Kiểm tra cổng `7100-7102` không bị ứng dụng khác dùng.
-5. Mở `padmirror.log`; output của UxPlay được ghi với prefix `UxPlay:`. Bản đóng gói ưu tiên UxPlay đi kèm để tránh chọn nhầm card Hyper-V/WSL.
+Hiện không có script firewall nào được đóng gói. Nếu về sau cần cấu hình firewall, rule sẽ được scope vào `PadMirror.exe` (sau M6/M7), không phải cho `uxplay.exe`.
 
-UxPlay là GPLv3 và không được nhúng vào PadMirror. Nếu phân phối UxPlay cùng ứng dụng, phải tuân thủ đầy đủ GPLv3 và cung cấp notice/source tương ứng.
+## Licensing
+
+Sản phẩm giữ license hiện tại (MIT) cho tới khi mã native dẫn xuất từ UxPlay thực sự được vendored vào binary. Tại thời điểm gated đó, license chuyển sang GPL-3.0-or-later kèm complete corresponding source. Hiện tại chưa nhúng mã UxPlay và không có source archive GPL nào được ship.

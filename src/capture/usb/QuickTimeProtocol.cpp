@@ -136,7 +136,7 @@ std::vector<std::uint8_t> makeAsyncPacket(
 std::vector<std::uint8_t> makeHpd1Packet() {
     auto displaySize = makeDictionary({
         {"Width", makeNumberDouble(1920.0)},
-        {"Height", makeNumberDouble(1200.0)},
+        {"Height", makeNumberDouble(1080.0)},
     });
     auto details = makeDictionary({
         {"Valeria", makeBoolValue(true)},
@@ -433,6 +433,7 @@ bool QuickTimeProtocol::send(const std::vector<std::uint8_t>& packet) {
         reportError("USB writer is not available");
         return false;
     }
+
     if (!writer_(packet)) {
         reportError("USB write failed");
         return false;

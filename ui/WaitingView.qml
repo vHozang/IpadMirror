@@ -80,7 +80,7 @@ Item {
                     font.letterSpacing: 1.4
                 }
                 Text {
-                    text: root.wifiMode ? "Convenience fallback" : "Lowest practical latency path"
+                    text: root.wifiMode ? "Wireless mirroring on the local network" : "Lowest practical latency path"
                     color: "#899399"
                     font.family: "Bahnschrift"
                     font.pixelSize: 12
@@ -123,8 +123,24 @@ Item {
                 Text {
                     Layout.fillWidth: true
                     text: root.wifiMode
-                          ? "3  Select PadMirror"
-                          : "3  Capture starts automatically"
+                          ? "3  Select PadMirror-PC"
+                          : "3  PadMirror starts capture when an Apple-supported AV channel is available"
+                    color: "#dce3dc"
+                    font.family: "Bahnschrift"
+                    font.pixelSize: 14
+                }
+                Text {
+                    Layout.fillWidth: true
+                    visible: !root.wifiMode
+                    text: "4  No Wi-Fi, Developer Mode or Screen Mirroring selection is required"
+                    color: "#dce3dc"
+                    font.family: "Bahnschrift"
+                    font.pixelSize: 14
+                }
+                Text {
+                    Layout.fillWidth: true
+                    visible: false
+                    text: ""
                     color: "#dce3dc"
                     font.family: "Bahnschrift"
                     font.pixelSize: 14
@@ -136,11 +152,13 @@ Item {
                     Layout.fillWidth: true
                     text: root.wifiMode
                           ? (app.wifiAvailable
-                             ? "Receiver ready at " + (app.wifiAddresses.length ? app.wifiAddresses.join(" / ") : "local network")
-                             : "UxPlay is not installed or its path is not configured")
+                             ? "AirPlay receiver ready - select PadMirror-PC in Screen Mirroring"
+                             : (app.errorText.length > 0
+                                ? app.errorText
+                                : "AirPlay receiver unavailable"))
                           : (devices.hasDevice
                              ? devices.currentName + (devices.trustKnown && !devices.currentTrusted ? " - waiting for Trust" : " - detected")
-                             : "No iPad detected")
+                             : (app.errorText.length > 0 ? app.errorText : "No iPad detected"))
                     color: root.wifiMode && !app.wifiAvailable ? "#ff776b" : root.accentColor
                     font.family: "Bahnschrift"
                     font.pixelSize: 12
@@ -153,7 +171,9 @@ Item {
         Button {
             id: receiverButton
             Layout.alignment: Qt.AlignHCenter
-            text: app.active ? "STOP RECEIVER" : "START RECEIVER"
+            text: app.active
+                  ? (root.wifiMode ? "STOP RECEIVER" : "STOP USB")
+                  : (root.wifiMode ? "START RECEIVER" : "START USB")
             onClicked: app.active ? app.stop() : app.start()
 
             contentItem: Text {

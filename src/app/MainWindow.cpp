@@ -1,154 +1,182 @@
 #include "app/MainWindow.h"
 
-#include "app/AppController.h"
-
 #include <QCloseEvent>
-#include <QDebug>
-#include <QEvent>
-#include <QHBoxLayout>
+#include <QFont>
+#include <QFrame>
 #include <QIcon>
 #include <QKeyEvent>
 #include <QLabel>
-#include <QMouseEvent>
-#include <QPalette>
-#include <QPushButton>
-#include <QQmlContext>
-#include <QQuickWidget>
+#include <QMetaObject>
+#include <QPainter>
 #include <QShowEvent>
 #include <QStackedLayout>
 #include <QVBoxLayout>
-#include <QWindow>
 
 namespace padmirror::app {
+namespace {
 
-MainWindow::MainWindow(AppController* controller, QWidget* parent)
-    : QWidget(parent),
-      controller_(controller) {
+QString titleFor(airplay::ReceiverState state) {
+    switch (state) {
+    case airplay::ReceiverState::Starting:
+        return QStringLiteral("STARTING");
+    case airplay::ReceiverState::Waiting:
+        return QStringLiteral("READY TO MIRROR");
+    case airplay::ReceiverState::Streaming:
+        return QStringLiteral("STREAMING");
+    case airplay::ReceiverState::Error:
+        return QStringLiteral("RECEIVER ERROR");
+    }
+    return {};
+}
+
+QString badgeFor(airplay::ReceiverState state) {
+    switch (state) {
+    case airplay::ReceiverState::Starting:
+        return QStringLiteral("INITIALIZING");
+    case airplay::ReceiverState::Waiting:
+        return QStringLiteral("AIRPLAY");
+    case airplay::ReceiverState::Streaming:
+        return QStringLiteral("LIVE");
+    case airplay::ReceiverState::Error:
+        return QStringLiteral("ERROR");
+    }
+    return {};
+}
+
+QString colorFor(airplay::ReceiverState state) {
+    return state == airplay::ReceiverState::Error
+        ? QStringLiteral("#ff695e")
+        : QStringLiteral("#b7f34a");
+}
+
+} // namespace
+
+MainWindow::MainWindow(QWidget* parent)
+    : QWidget(parent) {
     setWindowTitle(QStringLiteral("PadMirror"));
-    setWindowFlags(Qt::Window | Qt::FramelessWindowHint);
     setWindowIcon(QIcon(QStringLiteral(":/assets/icons/PadMirror-256.png")));
-    setAttribute(Qt::WA_NativeWindow);
-    setAutoFillBackground(true);
-    auto windowPalette = palette();
-    windowPalette.setColor(QPalette::Window, QColor(QStringLiteral("#07090a")));
-    setPalette(windowPalette);
-    setMinimumSize(960, 600);
+    setMinimumSize(640, 400);
     resize(1280, 800);
+    setStyleSheet(QStringLiteral("background: #050708;"));
 
-    pages_ = new QStackedLayout(this);
-    pages_->setContentsMargins(0, 0, 0, 0);
-    pages_->setStackingMode(QStackedLayout::StackOne);
+    auto* stack = new QStackedLayout(this);
+    stack->setContentsMargins(0, 0, 0, 0);
+    stack->setStackingMode(QStackedLayout::StackAll);
 
-    videoPage_ = new QWidget(this);
-    videoPage_->setObjectName(QStringLiteral("videoPage"));
-    videoPage_->setStyleSheet(QStringLiteral("background: #050708;"));
-    auto* videoLayout = new QVBoxLayout(videoPage_);
-    videoLayout->setContentsMargins(0, 0, 0, 0);
-    videoLayout->setSpacing(0);
-
-    streamBar_ = new QWidget(videoPage_);
-    streamBar_->setObjectName(QStringLiteral("streamBar"));
-    streamBar_->setFixedHeight(48);
-    streamBar_->installEventFilter(this);
-    streamBar_->setStyleSheet(QStringLiteral(
-        "QWidget#streamBar { background: #0c0f10; border-bottom: 1px solid #273034; }"
-        "QLabel#streamTitle { color: #eef3eb; font-family: Bahnschrift; font-size: 15px; "
-        "font-weight: 700; letter-spacing: 2px; }"
-        "QLabel#streamStatus { color: #899399; font-family: Bahnschrift; font-size: 11px; }"
-        "QPushButton { color: #eef3eb; background: transparent; border: 1px solid #273034; "
-        "border-radius: 4px; padding: 6px 12px; font-family: Bahnschrift; font-size: 10px; "
-        "font-weight: 700; }"
-        "QPushButton:hover { background: #22292c; }"
-        "QPushButton#stopButton { color: #07090a; background: #b7f34a; border-color: #b7f34a; }"
-        "QPushButton#closeButton:hover { background: #c9473d; border-color: #c9473d; }"));
-    auto* barLayout = new QHBoxLayout(streamBar_);
-    barLayout->setContentsMargins(16, 7, 10, 7);
-    barLayout->setSpacing(8);
-
-    auto* title = new QLabel(QStringLiteral("PADMIRROR"), streamBar_);
-    title->setObjectName(QStringLiteral("streamTitle"));
-    title->setAttribute(Qt::WA_TransparentForMouseEvents);
-    barLayout->addWidget(title);
-
-    streamStatus_ = new QLabel(streamBar_);
-    streamStatus_->setObjectName(QStringLiteral("streamStatus"));
-    streamStatus_->setAttribute(Qt::WA_TransparentForMouseEvents);
-    barLayout->addWidget(streamStatus_, 1);
-
-    const auto addButton = [this, barLayout](
-                               const QString& label,
-                               const QString& objectName,
-                               const auto& handler) {
-        auto* button = new QPushButton(label, streamBar_);
-        button->setObjectName(objectName);
-        button->setCursor(Qt::PointingHandCursor);
-        connect(button, &QPushButton::clicked, this, handler);
-        barLayout->addWidget(button);
-    };
-    addButton(QStringLiteral("STOP"), QStringLiteral("stopButton"), [this] { controller_->stop(); });
-    addButton(QStringLiteral("FULLSCREEN"), QString(), [this] { toggleFullscreen(); });
-    addButton(QStringLiteral("_"), QString(), [this] { showMinimized(); });
-    addButton(QStringLiteral("[]"), QString(), [this] { controller_->toggleMaximize(); });
-    addButton(QStringLiteral("X"), QStringLiteral("closeButton"), [this] { close(); });
-    videoLayout->addWidget(streamBar_);
-
-    videoHost_ = new QWidget(videoPage_);
-    videoHost_->setObjectName(QStringLiteral("videoHost"));
+    videoHost_ = new QWidget(this);
     videoHost_->setAttribute(Qt::WA_NativeWindow);
-    videoHost_->setStyleSheet(QStringLiteral("background: #050708;"));
-    videoLayout->addWidget(videoHost_, 1);
-    pages_->addWidget(videoPage_);
+    videoHost_->setAttribute(Qt::WA_OpaquePaintEvent);
+    videoHost_->setAutoFillBackground(true);
+    auto palette = videoHost_->palette();
+    palette.setColor(QPalette::Window, QColor(QStringLiteral("#000000")));
+    videoHost_->setPalette(palette);
+    stack->addWidget(videoHost_);
 
-    overlay_ = new QQuickWidget(this);
-    overlay_->setObjectName(QStringLiteral("overlay"));
-    overlay_->setResizeMode(QQuickWidget::SizeRootObjectToView);
-    overlay_->setClearColor(QColor(QStringLiteral("#07090a")));
-    overlay_->rootContext()->setContextProperty(QStringLiteral("app"), controller_);
-    overlay_->rootContext()->setContextProperty(QStringLiteral("settings"), controller_->settings());
-    overlay_->rootContext()->setContextProperty(QStringLiteral("devices"), controller_->devices());
-    overlay_->rootContext()->setContextProperty(QStringLiteral("metrics"), controller_->metrics());
-    connect(overlay_, &QQuickWidget::statusChanged, this, [this](QQuickWidget::Status status) {
-        if (status != QQuickWidget::Error) return;
-        for (const auto& error : overlay_->errors()) {
-            qCritical().noquote() << "QML:" << error.toString();
-        }
-    });
-    overlay_->setSource(QUrl(QStringLiteral("qrc:/ui/Main.qml")));
-    pages_->addWidget(overlay_);
-    pages_->setCurrentWidget(overlay_);
+    statePanel_ = new QWidget(this);
+    statePanel_->setAttribute(Qt::WA_StyledBackground);
+    statePanel_->setStyleSheet(QStringLiteral("background: #07090a;"));
+    auto* panelLayout = new QVBoxLayout(statePanel_);
+    panelLayout->setContentsMargins(48, 48, 48, 48);
+    panelLayout->addStretch(1);
 
-    controller_->setMainWindow(this);
-    connect(controller_, &AppController::stateChanged,
-            this, &MainWindow::updateLayerVisibility);
-    connect(controller_->metrics(), &diagnostics::Metrics::changed,
-            this, &MainWindow::updateStreamStatus);
-    updateLayerVisibility();
+    auto* card = new QFrame(statePanel_);
+    card->setMaximumWidth(620);
+    card->setObjectName(QStringLiteral("receiverCard"));
+    card->setStyleSheet(QStringLiteral(
+        "QFrame#receiverCard { background: #0d1113; border: 1px solid #283136; "
+        "border-radius: 14px; }"
+        "QLabel { background: transparent; color: #edf2eb; font-family: 'Segoe UI'; }"));
+    auto* cardLayout = new QVBoxLayout(card);
+    cardLayout->setContentsMargins(40, 36, 40, 40);
+    cardLayout->setSpacing(14);
+
+    auto* brand = new QLabel(QStringLiteral("PADMIRROR"), card);
+    auto brandFont = brand->font();
+    brandFont.setPointSize(10);
+    brandFont.setBold(true);
+    brandFont.setLetterSpacing(QFont::AbsoluteSpacing, 3.0);
+    brand->setFont(brandFont);
+    brand->setStyleSheet(QStringLiteral("color: #7f8a8e;"));
+    cardLayout->addWidget(brand);
+
+    stateBadge_ = new QLabel(card);
+    stateBadge_->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Preferred);
+    cardLayout->addWidget(stateBadge_);
+
+    stateTitle_ = new QLabel(card);
+    auto titleFont = stateTitle_->font();
+    titleFont.setPointSize(25);
+    titleFont.setBold(true);
+    titleFont.setLetterSpacing(QFont::AbsoluteSpacing, 1.2);
+    stateTitle_->setFont(titleFont);
+    cardLayout->addWidget(stateTitle_);
+
+    stateDetail_ = new QLabel(card);
+    stateDetail_->setWordWrap(true);
+    stateDetail_->setStyleSheet(QStringLiteral("color: #a3adb1; font-size: 14px;"));
+    cardLayout->addWidget(stateDetail_);
+
+    auto* instructions = new QLabel(
+        QStringLiteral("On iPad, open Control Center, choose Screen Mirroring, then select PadMirror."),
+        card);
+    instructions->setWordWrap(true);
+    instructions->setStyleSheet(QStringLiteral(
+        "color: #7f8a8e; font-size: 12px; border-top: 1px solid #283136; "
+        "padding-top: 18px; margin-top: 8px;"));
+    cardLayout->addWidget(instructions);
+
+    auto* row = new QHBoxLayout;
+    row->addStretch(1);
+    row->addWidget(card);
+    row->addStretch(1);
+    panelLayout->addLayout(row);
+    panelLayout->addStretch(1);
+    stack->addWidget(statePanel_);
+
+    receiver_ = std::make_unique<airplay::UxPlayReceiver>(
+        [this](airplay::ReceiverState state, const std::string& detail) {
+            const QString text = QString::fromUtf8(detail);
+            QMetaObject::invokeMethod(
+                this,
+                [this, state, text] { applyReceiverState(state, text); },
+                Qt::QueuedConnection);
+        });
+
+    applyReceiverState(airplay::ReceiverState::Starting,
+                       QStringLiteral("Preparing the in-process UxPlay receiver"));
 }
 
-void MainWindow::toggleFullscreen() {
-    if (isFullScreen()) showNormal();
-    else showFullScreen();
-    updateLayerVisibility();
+MainWindow::~MainWindow() {
+    if (receiver_) {
+        receiver_->stop();
+    }
 }
 
-void MainWindow::beginSystemMove() {
-    if (windowHandle()) windowHandle()->startSystemMove();
-}
+void MainWindow::startReceiver() {
+    if (receiverStartRequested_) {
+        return;
+    }
+    receiverStartRequested_ = true;
 
-void MainWindow::setAlwaysOnTop(bool enabled) {
-    const bool visible = isVisible();
-    setWindowFlag(Qt::WindowStaysOnTopHint, enabled);
-    if (visible) show();
+    const auto handle = static_cast<std::uintptr_t>(videoHost_->winId());
+    const auto result = receiver_->start("PadMirror", handle);
+    if (!result.started) {
+        applyReceiverState(airplay::ReceiverState::Error,
+                           QString::fromUtf8(result.detail));
+    }
 }
 
 void MainWindow::showEvent(QShowEvent* event) {
     QWidget::showEvent(event);
-    controller_->setVideoWindowHandle(static_cast<std::uintptr_t>(videoHost_->winId()));
-    updateLayerVisibility();
+    if (receiver_) {
+        receiver_->setWindowHandle(static_cast<std::uintptr_t>(videoHost_->winId()));
+    }
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
-    controller_->stop();
+    if (receiver_) {
+        receiver_->stop();
+    }
     QWidget::closeEvent(event);
 }
 
@@ -160,48 +188,32 @@ void MainWindow::keyPressEvent(QKeyEvent* event) {
     }
     if (event->key() == Qt::Key_Escape && isFullScreen()) {
         showNormal();
-        updateLayerVisibility();
         event->accept();
         return;
     }
     QWidget::keyPressEvent(event);
 }
 
-bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
-    if (watched == streamBar_) {
-        if (event->type() == QEvent::MouseButtonPress) {
-            const auto* mouseEvent = static_cast<QMouseEvent*>(event);
-            if (mouseEvent->button() == Qt::LeftButton) {
-                beginSystemMove();
-                return true;
-            }
-        }
-        if (event->type() == QEvent::MouseButtonDblClick) {
-            const auto* mouseEvent = static_cast<QMouseEvent*>(event);
-            if (mouseEvent->button() == Qt::LeftButton) {
-                controller_->toggleMaximize();
-                return true;
-            }
-        }
+void MainWindow::applyReceiverState(airplay::ReceiverState state,
+                                    const QString& detail) {
+    stateTitle_->setText(titleFor(state));
+    stateDetail_->setText(detail);
+
+    const auto color = colorFor(state);
+    stateBadge_->setText(badgeFor(state));
+    stateBadge_->setStyleSheet(QStringLiteral(
+        "QLabel { color: #07090a; background: %1; border-radius: 4px; "
+        "padding: 5px 9px; font-size: 10px; font-weight: 700; }").arg(color));
+
+    statePanel_->setVisible(state != airplay::ReceiverState::Streaming);
+}
+
+void MainWindow::toggleFullscreen() {
+    if (isFullScreen()) {
+        showNormal();
+    } else {
+        showFullScreen();
     }
-    return QWidget::eventFilter(watched, event);
-}
-
-void MainWindow::updateLayerVisibility() {
-    const bool streaming = controller_->streaming();
-    pages_->setCurrentWidget(streaming ? videoPage_ : overlay_);
-    streamBar_->setVisible(streaming && !isFullScreen());
-    updateStreamStatus();
-}
-
-void MainWindow::updateStreamStatus() {
-    if (!streamStatus_) return;
-    const auto fps = qRound(controller_->metrics()->renderFps());
-    const auto fpsText = fps > 0
-        ? QStringLiteral("%1 FPS").arg(fps)
-        : (controller_->streaming() ? QStringLiteral("IDLE") : QStringLiteral("-- FPS"));
-    streamStatus_->setText(QStringLiteral("%1  /  %2  /  %3")
-        .arg(controller_->connectionLabel(), controller_->statusText(), fpsText));
 }
 
 } // namespace padmirror::app

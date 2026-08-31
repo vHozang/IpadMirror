@@ -130,10 +130,10 @@ Item {
                 accent: settings.connectionMode === 1 ? root.cyan : root.lime
             }
             StatusPill {
-                label: metrics.sourceFps > 1
-                       ? Math.round(metrics.sourceFps) + " FPS"
+                label: app.streaming && metrics.renderFps > 1
+                       ? Math.round(metrics.renderFps) + " FPS OUT"
                        : (app.streaming ? "IDLE" : "-- FPS")
-                active: metrics.sourceFps > 50
+                active: app.streaming && metrics.renderFps >= 50
                 accent: root.lime
             }
 

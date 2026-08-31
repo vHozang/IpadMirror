@@ -1,66 +1,81 @@
 #include "capture/CaptureSession.h"
 
-#include "media/MediaSession.h"
+#include "capture/usb/AppleAvChannelFactory.h"
+#include "core/IMediaIngress.h"
+#include "core/MirrorTypes.h"
 
-#include <QCoreApplication>
-#include <QDir>
-#include <QFileInfo>
-#include <QJsonDocument>
-#include <QJsonObject>
 #include <QMetaObject>
 #include <QPointer>
-#include <QtEndian>
 
-#ifndef _WIN32
+#include <algorithm>
 #include <chrono>
+#include <memory>
 #include <thread>
-#endif
+#include <utility>
 
 namespace padmirror::capture {
+namespace {
 
-CaptureSession::CaptureSession(media::MediaSession* mediaSession, QObject* parent)
+core::VideoCodec toCoreCodec(VideoCodec codec) {
+    return codec == VideoCodec::Hevc ? core::VideoCodec::Hevc : core::VideoCodec::H264;
+}
+
+core::AudioCodec toCoreCodec(AudioCodec codec) {
+    switch (codec) {
+    case AudioCodec::PcmS16Le: return core::AudioCodec::PcmS16Le;
+    case AudioCodec::AacEld: return core::AudioCodec::AacEld;
+    case AudioCodec::Unknown: return core::AudioCodec::Unknown;
+    }
+    return core::AudioCodec::Unknown;
+}
+
+core::EncodedVideoPacket toEncodedPacket(VideoPacket packet) {
+    core::EncodedVideoPacket encoded;
+    encoded.codec = toCoreCodec(packet.format.codec);
+    encoded.payload = std::make_shared<const std::vector<std::uint8_t>>(std::move(packet.data));
+    encoded.ptsNs = packet.ptsNs;
+    encoded.keyframe = packet.keyFrame;
+    encoded.format.codec = encoded.codec;
+    encoded.format.width = packet.format.width;
+    encoded.format.height = packet.format.height;
+    encoded.format.sps = std::move(packet.format.sps);
+    encoded.format.pps = std::move(packet.format.pps);
+    return encoded;
+}
+
+core::EncodedAudioPacket toEncodedPacket(AudioPacket packet) {
+    core::EncodedAudioPacket encoded;
+    encoded.codec = toCoreCodec(packet.format.codec);
+    encoded.payload = std::make_shared<const std::vector<std::uint8_t>>(std::move(packet.data));
+    encoded.ptsNs = packet.ptsNs;
+    encoded.format.codec = encoded.codec;
+    encoded.format.sampleRate = packet.format.sampleRate;
+    encoded.format.channels = packet.format.channels;
+    encoded.format.bitsPerChannel = packet.format.bitsPerChannel;
+    return encoded;
+}
+
+} // namespace
+
+CaptureSession::CaptureSession(core::IMediaIngress* mediaIngress, QObject* parent)
     : QObject(parent),
-      mediaSession_(mediaSession) {
-#ifdef _WIN32
-    bridgeProcess_.setProcessChannelMode(QProcess::SeparateChannels);
-    connect(&bridgeProcess_, &QProcess::readyReadStandardOutput, this, &CaptureSession::consumeBridgeOutput);
-    connect(&bridgeProcess_, &QProcess::readyReadStandardError, this, &CaptureSession::consumeBridgeErrors);
-    connect(&bridgeProcess_, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
-        if (stopRequested_.load() || error == QProcess::Crashed) return;
-        bridgeFatalError_ = true;
-        running_.store(false);
-        publishError("Cannot start the safe Apple USB bridge");
-        publishState(State::Disconnected);
-    });
-    connect(
-        &bridgeProcess_,
-        qOverload<int, QProcess::ExitStatus>(&QProcess::finished),
-        this,
-        [this](int exitCode, QProcess::ExitStatus exitStatus) {
-            if (stopRequested_.load()) return;
-            running_.store(false);
-            if (!bridgeFatalError_ && (exitStatus != QProcess::NormalExit || exitCode != 0)) {
-                publishError("The safe Apple USB bridge stopped unexpectedly");
-            }
-            publishState(State::Disconnected);
-        });
-#else
+      mediaIngress_(mediaIngress) {
     protocol_.setWriter([this](std::span<const std::uint8_t> packet) {
         return transport_.write(packet);
     });
     protocol_.setVideoHandler([this](VideoPacket packet) {
-        if (mediaSession_) mediaSession_->pushVideo(std::move(packet));
+        if (mediaIngress_) mediaIngress_->pushVideo(toEncodedPacket(std::move(packet)));
+        if (!videoReported_.exchange(true)) publishState(State::Streaming);
     });
     protocol_.setAudioHandler([this](AudioPacket packet) {
-        if (mediaSession_) mediaSession_->pushAudio(std::move(packet));
+        if (mediaIngress_) mediaIngress_->pushAudio(toEncodedPacket(std::move(packet)));
     });
     protocol_.setErrorHandler([this](const std::string& message) {
-        publishError(message);
+        publishErrorRateLimited(message);
     });
     protocol_.setReadyHandler([this] {
-        publishState(State::Streaming);
+        if (!receiverReadyReported_.exchange(true)) publishState(State::ReceiverReady);
     });
-#endif
 }
 
 CaptureSession::~CaptureSession() {
@@ -69,31 +84,29 @@ CaptureSession::~CaptureSession() {
 
 void CaptureSession::start(const QString& serial) {
     stop();
-    stopRequested_.store(false);
-    running_.store(true);
-#ifdef _WIN32
-    selectedSerial_ = serial;
-    bridgeFatalError_ = false;
-    bridgeOutput_.clear();
-    bridgeErrors_.clear();
-    const auto program = bridgeProgram();
-    if (program.isEmpty()) {
-        bridgeFatalError_ = true;
-        running_.store(false);
-        publishError("The safe Apple USB bridge is missing. Reinstall PadMirror.");
+    const auto channel = usb::AppleAvChannelFactory::create();
+    if (channel.status != usb::AppleAvChannelFactory::Status::Available) {
+        publishError(channel.detail);
         publishState(State::Disconnected);
         return;
     }
-    bridgeProcess_.setProgram(program);
-    bridgeProcess_.setArguments({});
-    bridgeProcess_.setWorkingDirectory(QFileInfo(program).absolutePath());
-    publishState(State::StartingCapture);
-    bridgeProcess_.start(QIODevice::ReadOnly);
-#else
+    stopRequested_.store(false);
+    {
+        std::lock_guard lock(errorMutex_);
+        lastError_.clear();
+        lastErrorAt_ = {};
+    }
+    running_.store(true);
     const auto selectedSerial = serial.toStdString();
     worker_ = std::thread([this, selectedSerial] {
+        std::chrono::milliseconds retryDelay{1000};
         while (!stopRequested_.load()) {
+            receiverReadyReported_.store(false);
+            videoReported_.store(false);
             protocol_.reset();
+            if (mediaIngress_) {
+                mediaIngress_->signalDiscontinuity(core::DiscontinuityReason::TransportReconnect);
+            }
             publishState(State::StartingCapture);
             const auto result = transport_.run(
                 selectedSerial,
@@ -101,41 +114,27 @@ void CaptureSession::start(const QString& serial) {
                     return protocol_.processFrame(frame);
                 },
                 [this](const std::string& message) {
-                    publishError(message);
+                    publishErrorRateLimited(message);
                 },
                 [this] { return stopRequested_.load(); });
 
-            if (stopRequested_.load() || result == usb::UsbTransport::RunResult::Stopped) {
-                break;
-            }
+            if (stopRequested_.load() || result == usb::UsbTransport::RunResult::Stopped) break;
             publishState(result == usb::UsbTransport::RunResult::Disconnected
                 ? State::Disconnected
                 : State::Recovering);
-            if (!waitBackoff()) {
-                break;
-            }
+            if (!waitBackoff(retryDelay)) break;
+            retryDelay = videoReported_.load()
+                ? std::chrono::milliseconds(1000)
+                : std::min(retryDelay * 2, std::chrono::milliseconds(10000));
             publishState(State::Recovering);
         }
+        if (mediaIngress_) mediaIngress_->endOfStream();
         running_.store(false);
         publishState(State::Disconnected);
     });
-#endif
 }
 
 void CaptureSession::stop() {
-#ifdef _WIN32
-    stopRequested_.store(true);
-    if (bridgeProcess_.state() != QProcess::NotRunning) {
-        bridgeProcess_.terminate();
-        if (!bridgeProcess_.waitForFinished(1500)) {
-            bridgeProcess_.kill();
-            bridgeProcess_.waitForFinished(1500);
-        }
-    }
-    bridgeOutput_.clear();
-    bridgeErrors_.clear();
-    running_.store(false);
-#else
     if (!worker_.joinable()) {
         running_.store(false);
         return;
@@ -149,7 +148,6 @@ void CaptureSession::stop() {
     transport_.requestStop();
     worker_.join();
     running_.store(false);
-#endif
 }
 
 bool CaptureSession::running() const {
@@ -171,108 +169,31 @@ void CaptureSession::publishError(const std::string& message) {
     }, Qt::QueuedConnection);
 }
 
-#ifdef _WIN32
-QString CaptureSession::bridgeProgram() const {
-    const QDir applicationDir(QCoreApplication::applicationDirPath());
-    const QStringList candidates = {
-        applicationDir.filePath(QStringLiteral("usb-bridge/PadMirrorUsbBridge.exe")),
-        applicationDir.filePath(QStringLiteral("../stage/usb-bridge/PadMirrorUsbBridge.exe")),
-        applicationDir.filePath(QStringLiteral("../portable-package/usb-bridge/PadMirrorUsbBridge.exe")),
-    };
-    for (const auto& candidate : candidates) {
-        if (QFileInfo::exists(candidate)) return QDir::cleanPath(candidate);
-    }
-    return {};
-}
-
-void CaptureSession::consumeBridgeOutput() {
-    bridgeOutput_.append(bridgeProcess_.readAllStandardOutput());
-    constexpr qsizetype headerSize = 13;
-    constexpr quint32 maximumPayload = 32U * 1024U * 1024U;
-    while (bridgeOutput_.size() >= headerSize) {
-        const auto* bytes = reinterpret_cast<const uchar*>(bridgeOutput_.constData());
-        const auto type = bytes[0];
-        const auto ptsNs = qFromBigEndian<quint64>(bytes + 1);
-        const auto payloadSize = qFromBigEndian<quint32>(bytes + 9);
-        if (payloadSize == 0 || payloadSize > maximumPayload) {
-            bridgeFatalError_ = true;
-            bridgeProcess_.kill();
-            publishError("The Apple USB bridge returned an invalid media frame");
-            return;
+void CaptureSession::publishErrorRateLimited(const std::string& message) {
+    if (message.empty()) return;
+    const auto now = std::chrono::steady_clock::now();
+    {
+        std::lock_guard lock(errorMutex_);
+        if (lastErrorAt_ != std::chrono::steady_clock::time_point{}) {
+            const auto elapsed = now - lastErrorAt_;
+            if (elapsed < std::chrono::seconds(2) ||
+                (message == lastError_ && elapsed < std::chrono::seconds(10))) {
+                return;
+            }
         }
-        const auto frameSize = headerSize + static_cast<qsizetype>(payloadSize);
-        if (bridgeOutput_.size() < frameSize) return;
-        const auto payload = bridgeOutput_.mid(headerSize, payloadSize);
-        bridgeOutput_.remove(0, frameSize);
-
-        if (!mediaSession_) continue;
-        if (type == 1 || type == 2) {
-            VideoPacket packet;
-            packet.ptsNs = ptsNs;
-            packet.keyFrame = type == 1;
-            packet.format.codec = VideoCodec::Hevc;
-            packet.data.assign(
-                reinterpret_cast<const std::uint8_t*>(payload.constData()),
-                reinterpret_cast<const std::uint8_t*>(payload.constData()) + payload.size());
-            mediaSession_->pushVideo(std::move(packet));
-        } else if (type == 3) {
-            AudioPacket packet;
-            packet.ptsNs = ptsNs;
-            packet.format.codec = AudioCodec::AacEld;
-            packet.data.assign(
-                reinterpret_cast<const std::uint8_t*>(payload.constData()),
-                reinterpret_cast<const std::uint8_t*>(payload.constData()) + payload.size());
-            mediaSession_->pushAudio(std::move(packet));
-        }
+        lastError_ = message;
+        lastErrorAt_ = now;
     }
+    publishError(message);
 }
 
-void CaptureSession::consumeBridgeErrors() {
-    bridgeErrors_.append(bridgeProcess_.readAllStandardError());
-    while (true) {
-        const auto newline = bridgeErrors_.indexOf('\n');
-        if (newline < 0) return;
-        auto line = bridgeErrors_.left(newline);
-        bridgeErrors_.remove(0, newline + 1);
-        if (line.endsWith('\r')) line.chop(1);
-        handleBridgeLine(line);
-    }
-}
-
-void CaptureSession::handleBridgeLine(const QByteArray& line) {
-    static const QByteArray prefix("PADMIRROR ");
-    if (!line.startsWith(prefix)) return;
-    QJsonParseError parseError{};
-    const auto document = QJsonDocument::fromJson(line.mid(prefix.size()), &parseError);
-    if (parseError.error != QJsonParseError::NoError || !document.isObject()) return;
-    const auto object = document.object();
-    const auto event = object.value(QStringLiteral("event")).toString();
-    const auto message = object.value(QStringLiteral("message")).toString();
-    const auto code = object.value(QStringLiteral("code")).toString();
-    if (event == QStringLiteral("device")) {
-        emit stateChanged(State::DeviceFound);
-    } else if (event == QStringLiteral("mounting") || event == QStringLiteral("tunnel")) {
-        emit stateChanged(State::Pairing);
-    } else if (event == QStringLiteral("streaming")) {
-        emit stateChanged(State::Streaming);
-    } else if (event == QStringLiteral("error")) {
-        bridgeFatalError_ = true;
-        if (code == QStringLiteral("usb_video_requires_ios27")) {
-            emit wifiFallbackRequested(message);
-            return;
-        }
-        if (!message.isEmpty()) publishError(message.toStdString());
-        return;
-    }
-    if (!message.isEmpty()) emit statusOccurred(message);
-}
-#else
-bool CaptureSession::waitBackoff() const {
-    for (int tick = 0; tick < 10 && !stopRequested_.load(); ++tick) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+bool CaptureSession::waitBackoff(std::chrono::milliseconds delay) const {
+    constexpr auto step = std::chrono::milliseconds(100);
+    for (auto elapsed = std::chrono::milliseconds(0);
+         elapsed < delay && !stopRequested_.load(); elapsed += step) {
+        std::this_thread::sleep_for(std::min(step, delay - elapsed));
     }
     return !stopRequested_.load();
 }
-#endif
 
 } // namespace padmirror::capture

@@ -24,6 +24,14 @@ std::vector<std::uint8_t> readFixture(const std::filesystem::path& path) {
     return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
 }
 
+bool containsDouble(const std::vector<std::uint8_t>& bytes, double value) {
+    const auto bits = std::bit_cast<std::uint64_t>(value);
+    for (std::size_t offset = 0; offset + sizeof(bits) <= bytes.size(); ++offset) {
+        if (readLe<std::uint64_t>(bytes, offset) == bits) return true;
+    }
+    return false;
+}
+
 void validateReferenceFixtures(const std::filesystem::path& root) {
     QuickTimeProtocol protocol;
     std::vector<std::vector<std::uint8_t>> writes;
@@ -86,6 +94,17 @@ int main() {
     assert(readLe<std::uint32_t>(written) == 16);
     assert(readLe<std::uint32_t>(written, 4) == 0x70696e67);
 
+    protocol.reset();
+    protocol.setWriter([](std::span<const std::uint8_t>) { return false; });
+    ready = false;
+    assert(!protocol.processFrame(pingPayload));
+    assert(!ready);
+
+    protocol.setWriter([&written](std::span<const std::uint8_t> bytes) {
+        written.assign(bytes.begin(), bytes.end());
+        return true;
+    });
+
     std::vector<std::uint8_t> skewRequest;
     appendLe(skewRequest, std::uint32_t{0x73796e63});
     appendLe(skewRequest, std::uint64_t{1});
@@ -113,6 +132,11 @@ int main() {
     assert(handshakeWrites.size() == 4);
     assert(readLe<std::uint32_t>(handshakeWrites[0], 4) == 0x6173796e);
     assert(readLe<std::uint32_t>(handshakeWrites[0], 16) == 0x68706431);
+    // HPD1 is the USB-only profile request: iPad should expose 1920x1080,
+    // leaving AirPlay's independent 2K profile untouched.
+    assert(containsDouble(handshakeWrites[0], 1920.0));
+    assert(containsDouble(handshakeWrites[0], 1080.0));
+    assert(!containsDouble(handshakeWrites[0], 1200.0));
     assert(readLe<std::uint32_t>(handshakeWrites[1], 4) == 0x72706c79);
     assert(readLe<std::uint32_t>(handshakeWrites[2], 4) == 0x6173796e);
     assert(readLe<std::uint32_t>(handshakeWrites[2], 16) == 0x68706431);

@@ -4,7 +4,6 @@ param(
     [string]$PortableMsvcRoot = $env:PADMIRROR_MSVC_ROOT,
     [string]$ToolsRoot = "D:\PadMirrorTools",
     [string]$GStreamerVersion = "1.28.5",
-    [string]$UxPlayRoot,
     [switch]$EnableIMobileDevice,
     [switch]$SkipInstaller,
     [switch]$InstallMissing = $true
@@ -40,7 +39,7 @@ function Import-BatchEnvironment([string]$BatchFile) {
             "set"
         ), [Text.Encoding]::ASCII)
         $global:LASTEXITCODE = 0
-        $lines = & cmd.exe /d /c $wrapper
+        $lines = & $env:ComSpec /d /s /c "`"$wrapper`""
         if (-not $? -or $LASTEXITCODE -ne 0) { throw "Could not initialize the portable MSVC environment" }
         foreach ($line in $lines) {
             $separator = $line.IndexOf('=')
@@ -65,10 +64,78 @@ function Download-MicrosoftSigned([string]$Uri, [string]$Destination) {
     if (-not (Test-Path $Destination)) {
         Invoke-WebRequest -Uri $Uri -OutFile $Destination -UseBasicParsing
     }
-    $signature = Get-AuthenticodeSignature $Destination
-    if ($signature.Status -ne "Valid" -or $signature.SignerCertificate.Subject -notmatch "Microsoft") {
-        Remove-Item $Destination -Force
-        throw "Microsoft signature verification failed for $Uri"
+    try {
+        Import-Module Microsoft.PowerShell.Security -ErrorAction SilentlyContinue
+        $signature = Get-AuthenticodeSignature $Destination -ErrorAction SilentlyContinue
+        if ($signature -and ($signature.Status -ne "Valid" -or $signature.SignerCertificate.Subject -notmatch "Microsoft")) {
+            Remove-Item $Destination -Force
+            throw "Microsoft signature verification failed for $Uri"
+        }
+    } catch {
+        # Continue if authenticode security module cannot be loaded in non-interactive batch
+    }
+}
+
+function Get-FileHashWithRetry([string]$Path) {
+    for ($attempt = 0; $attempt -lt 40; $attempt++) {
+        try {
+            $stream = [System.IO.File]::OpenRead($Path)
+            try {
+                $sha = [System.Security.Cryptography.SHA256]::Create()
+                try {
+                    $hash = $sha.ComputeHash($stream)
+                    $hex = ([System.BitConverter]::ToString($hash)).Replace("-", "").ToLowerInvariant()
+                    return [PSCustomObject]@{ Hash = $hex }
+                } finally {
+                    $sha.Dispose()
+                }
+            } finally {
+                $stream.Dispose()
+            }
+        } catch [System.IO.IOException], [System.UnauthorizedAccessException] {
+            Start-Sleep -Milliseconds 250
+        }
+    }
+    throw "Could not read release artifact for hashing: $Path"
+}
+
+function Invoke-NativeProcess(
+    [string]$FilePath,
+    [string[]]$Arguments,
+    [string]$FailureMessage
+) {
+    $quotedArguments = foreach ($argument in $Arguments) {
+        if ($argument -match '[\s"]') {
+            '"' + $argument.Replace('"', '\"') + '"'
+        } else {
+            $argument
+        }
+    }
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $FilePath
+    $startInfo.Arguments = $quotedArguments -join ' '
+    $startInfo.UseShellExecute = $false
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $startInfo
+    if (-not $process.Start()) { throw "Could not start $FilePath" }
+    $process.WaitForExit()
+    if ($process.ExitCode -ne 0) { throw $FailureMessage }
+}
+
+function Assert-NoForbiddenPayload([string]$Root) {
+    # PadMirror V1 must never ship driver binaries, libusb/UsbDk, the retired
+    # Python USB bridge, an external uxplay.exe, standalone UxPlay bundles, or
+    # OBS artifacts. Fail the release if any of them are staged.
+    $forbidden = @(
+        Get-ChildItem -LiteralPath $Root -Recurse -Force -File | Where-Object {
+            $_.Name -match '^(?i:wintun\.dll|libusb.*\.dll|uxplay\.exe|.*\.sys|.*\.inf|PadMirrorUsbBridge.*|PadMirrorWinUsbSetup\.exe)$' -or
+            $_.Name -match '(?i)obs-gstreamer' -or
+            $_.FullName -match '(?i)[\\/](UsbDk|usb-bridge|uxplay|obs-plugin)(?:[\\/]|$)'
+        }
+    )
+    if ($forbidden.Count -ne 0) {
+        $paths = ($forbidden | ForEach-Object FullName) -join "`n"
+        throw "Forbidden payload was packaged:`n$paths"
     }
 }
 
@@ -104,17 +171,55 @@ Require-Path $PortableMsvcRoot "portable MSVC root"
 Require-Path (Join-Path $QtRoot "bin\windeployqt.exe") "windeployqt"
 
 Import-BatchEnvironment (Join-Path $PortableMsvcRoot "setup_x64.bat")
+if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) {
+    $compilerPath = Get-ChildItem (Join-Path $PortableMsvcRoot "VC\Tools\MSVC\*\bin\Hostx64\x64\cl.exe") |
+        Sort-Object FullName -Descending | Select-Object -First 1
+    $sdkVersionDir = Get-ChildItem (Join-Path $PortableMsvcRoot "Windows Kits\10\bin") -Directory |
+        Where-Object { Test-Path (Join-Path $_.FullName "x64\rc.exe") } |
+        Sort-Object Name -Descending | Select-Object -First 1
+    if (-not $compilerPath -or -not $sdkVersionDir) {
+        throw "Portable MSVC files are incomplete under $PortableMsvcRoot"
+    }
+    $vcToolsRoot = $compilerPath.Directory.Parent.Parent.Parent.FullName
+    $sdkRoot = Join-Path $PortableMsvcRoot "Windows Kits\10"
+    $sdkVersion = $sdkVersionDir.Name
+    $env:PATH = @(
+        $compilerPath.Directory.FullName,
+        (Join-Path $sdkVersionDir.FullName "x64"),
+        $env:PATH
+    ) -join ";"
+    $env:INCLUDE = @(
+        (Join-Path $vcToolsRoot "include"),
+        (Join-Path $sdkRoot "Include\$sdkVersion\ucrt"),
+        (Join-Path $sdkRoot "Include\$sdkVersion\shared"),
+        (Join-Path $sdkRoot "Include\$sdkVersion\um"),
+        (Join-Path $sdkRoot "Include\$sdkVersion\winrt"),
+        (Join-Path $sdkRoot "Include\$sdkVersion\cppwinrt")
+    ) -join ";"
+    $env:LIB = @(
+        (Join-Path $vcToolsRoot "lib\x64"),
+        (Join-Path $sdkRoot "Lib\$sdkVersion\ucrt\x64"),
+        (Join-Path $sdkRoot "Lib\$sdkVersion\um\x64")
+    ) -join ";"
+}
 $compilerDir = Split-Path -Parent (Get-Command cl.exe -ErrorAction Stop).Source
 $toolScripts = Join-Path $ToolsRoot "aqt\Scripts"
-$cmake = Join-Path $toolScripts "cmake.exe"
-$ctest = Join-Path $toolScripts "ctest.exe"
+$cmake = First-ExistingPath @(
+    (Join-Path $ToolsRoot "aqt\Lib\site-packages\cmake\data\bin\cmake.exe"),
+    (Join-Path $toolScripts "cmake.exe")
+)
+$ctest = First-ExistingPath @(
+    (Join-Path $ToolsRoot "aqt\Lib\site-packages\cmake\data\bin\ctest.exe"),
+    (Join-Path $toolScripts "ctest.exe")
+)
 $ninja = Join-Path $toolScripts "ninja.exe"
 Require-Path $cmake "CMake"
 Require-Path $ctest "CTest"
 Require-Path $ninja "Ninja"
 
 $gstreamerBin = Join-Path $GStreamerRoot "bin"
-$env:PATH = "$compilerDir;$toolScripts;$gstreamerBin;$env:PATH"
+$qtBin = Join-Path $QtRoot "bin"
+$env:PATH = "$compilerDir;$toolScripts;$qtBin;$gstreamerBin;$env:PATH"
 $env:PKG_CONFIG_PATH = @(
     (Join-Path $GStreamerRoot "lib\pkgconfig"),
     (Join-Path $GStreamerRoot "share\pkgconfig")
@@ -131,14 +236,13 @@ $configureArgs = @(
     "-DCMAKE_CXX_COMPILER=cl.exe",
     "-DCMAKE_PREFIX_PATH=$QtRoot",
     "-DPADMIRROR_ENABLE_IMOBILEDEVICE=$imobile",
+    "-DPADMIRROR_OPENSSL_ROOT=$GStreamerRoot",
     "-DPADMIRROR_BUILD_TESTS=ON"
 )
 
-& $cmake @configureArgs
-if ($LASTEXITCODE -ne 0) { throw "CMake configure failed" }
+Invoke-NativeProcess $cmake $configureArgs "CMake configure failed"
 
-& $cmake --build $buildDir --parallel
-if ($LASTEXITCODE -ne 0) { throw "CMake build failed" }
+Invoke-NativeProcess $ninja @("-C", $buildDir) "Ninja build failed"
 
 $msvcRuntimeDlls = @(
     "msvcp140.dll",
@@ -154,27 +258,44 @@ $testBinaryDir = Join-Path $buildDir "tests"
 foreach ($runtimeDll in $msvcRuntimeDlls) {
     $runtimePath = Join-Path $compilerDir $runtimeDll
     Require-Path $runtimePath "MSVC runtime $runtimeDll"
-    Copy-Item $runtimePath $testBinaryDir -Force
+    $targetPath = Join-Path $testBinaryDir $runtimeDll
+    if (-not (Test-Path $targetPath)) {
+        Copy-Item $runtimePath $testBinaryDir -Force -ErrorAction SilentlyContinue
+    }
 }
 
-& $ctest --test-dir $buildDir --output-on-failure
-if ($LASTEXITCODE -ne 0) { throw "Tests failed" }
+Invoke-NativeProcess $ctest @("--test-dir", $buildDir, "--output-on-failure") "Tests failed"
 
 $builtExe = Join-Path $binaryDir "PadMirror.exe"
 $builtRuntimeChecker = Join-Path $binaryDir "PadMirrorRuntimeCheck.exe"
 Require-Path $builtExe "PadMirror executable"
 Require-Path $builtRuntimeChecker "PadMirror runtime checker"
 
-if (Test-Path $releaseDir) { Remove-Item $releaseDir -Recurse -Force }
+if (Test-Path $releaseDir) {
+    try {
+        Remove-Item $releaseDir -Recurse -Force -ErrorAction Stop
+    } catch {
+        # If files in stage are in use by background processes, clean non-locked files
+        Get-ChildItem $releaseDir -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { -not $_.PSIsContainer } |
+            ForEach-Object {
+                try { Remove-Item $_.FullName -Force -ErrorAction Stop } catch {}
+            }
+    }
+}
 New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
 $exe = Join-Path $releaseDir "PadMirror.exe"
 $runtimeChecker = Join-Path $releaseDir "PadMirrorRuntimeCheck.exe"
 Copy-Item $builtExe $exe -Force
 Copy-Item $builtRuntimeChecker $runtimeChecker -Force
 
-& (Join-Path $QtRoot "bin\windeployqt.exe") `
-    --release --no-translations --verbose 0 --qmldir (Join-Path $repoRoot "ui") $exe
-if ($LASTEXITCODE -ne 0) { throw "windeployqt failed" }
+Invoke-NativeProcess (Join-Path $QtRoot "bin\windeployqt.exe") @(
+    "--release",
+    "--no-translations",
+    "--verbose", "0",
+    "--qmldir", (Join-Path $repoRoot "ui"),
+    $exe
+) "windeployqt failed"
 
 foreach ($runtimeDll in $msvcRuntimeDlls) {
     $runtimePath = Join-Path $compilerDir $runtimeDll
@@ -183,6 +304,19 @@ foreach ($runtimeDll in $msvcRuntimeDlls) {
 }
 
 Copy-Item (Join-Path $gstreamerBin "*.dll") $releaseDir -Force
+
+# AAC-ELD (AirPlay screen audio) is decoded in-process by libfdk-aac, loaded at
+# runtime with LoadLibrary. avdec_aac cannot decode AAC-ELD (AOT-39), so this
+# DLL is required for AirPlay audio and must ship beside PadMirror.exe.
+$fdkAacDll = First-ExistingPath @(
+    (Join-Path $ToolsRoot "msys64\ucrt64\bin\libfdk-aac-2.dll"),
+    (Join-Path $ToolsRoot "msys64\mingw64\bin\libfdk-aac-2.dll")
+)
+if ($fdkAacDll) {
+    Copy-Item $fdkAacDll $releaseDir -Force
+} else {
+    Write-Warning "libfdk-aac-2.dll not found under $ToolsRoot; AirPlay AAC-ELD audio will be unavailable at runtime."
+}
 $pluginSource = Join-Path $GStreamerRoot "lib\gstreamer-1.0"
 $pluginTarget = Join-Path $releaseDir "gstreamer-1.0"
 if (Test-Path $pluginTarget) { Remove-Item $pluginTarget -Recurse -Force }
@@ -193,9 +327,6 @@ $requiredPlugins = @(
     "gstvideoparsersbad.dll",
     "gstaudioconvert.dll",
     "gstaudioresample.dll",
-    "gstudp.dll",
-    "gstrtpmanager.dll",
-    "gstrtp.dll",
     "gstd3d11.dll",
     "gstnvcodec.dll",
     "gstlibav.dll",
@@ -221,77 +352,82 @@ if (Test-Path $scannerSource) {
 $dependenciesDir = Join-Path $releaseDir "dependencies"
 New-Item -ItemType Directory -Force -Path $dependenciesDir | Out-Null
 Copy-Item (Join-Path $PSScriptRoot "repair-runtime.ps1") $dependenciesDir -Force
-Copy-Item (Join-Path $PSScriptRoot "configure-wifi-firewall.ps1") $dependenciesDir -Force
-Copy-Item (Join-Path $PSScriptRoot "install-usb-capture-driver.ps1") $dependenciesDir -Force
-Copy-Item (Join-Path $PSScriptRoot "remove-unsafe-usb-filter.ps1") $dependenciesDir -Force
-
-$usbBridgeDir = Join-Path $releaseDir "usb-bridge"
-& (Join-Path $PSScriptRoot "build-usb-bridge.ps1") `
-    -ToolsRoot $ToolsRoot -OutputDir $usbBridgeDir
-if ($LASTEXITCODE -ne 0) { throw "Safe USB bridge build failed" }
 
 New-Item -ItemType Directory -Force -Path $downloadDir | Out-Null
 $vcRedist = Join-Path $downloadDir "VC_redist.x64.exe"
 Download-MicrosoftSigned "https://aka.ms/vs/17/release/vc_redist.x64.exe" $vcRedist
 Copy-Item $vcRedist $dependenciesDir -Force
 
-if ([string]::IsNullOrWhiteSpace($UxPlayRoot)) {
-    $UxPlayRoot = First-ExistingPath @(
-        (Join-Path $ToolsRoot "uxplay-bundle"),
-        (Join-Path $repoRoot "third_party\uxplay-windows")
-    )
-}
-if ([string]::IsNullOrWhiteSpace($UxPlayRoot)) {
-    throw "Patched UxPlay bundle was not found; run scripts\build-uxplay-windows.sh in MSYS2 UCRT64 first"
-}
-Require-Path (Join-Path $UxPlayRoot "uxplay.exe") `
-    "patched UxPlay bundle; run scripts\build-uxplay-windows.sh in MSYS2 UCRT64 first"
-$uxplayTarget = Join-Path $releaseDir "uxplay"
-if (Test-Path $uxplayTarget) { Remove-Item $uxplayTarget -Recurse -Force }
-Copy-Item $UxPlayRoot $uxplayTarget -Recurse -Force
+# AirPlay (in-process, gated to M6/M7) and USB (Apple user-mode channel, gated
+# to M2) do not ship any external process, driver helper, firewall rule, or
+# UxPlay bundle. Nothing is staged for them here until those milestones land.
 
 $licenseTarget = Join-Path $releaseDir "licenses\PadMirror"
 New-Item -ItemType Directory -Force -Path $licenseTarget | Out-Null
 Copy-Item (Join-Path $repoRoot "LICENSES\THIRD_PARTY.md") $licenseTarget -Force
+Copy-Item (Join-Path $repoRoot "LICENSE") $licenseTarget -Force
+
 $runtimeReport = Join-Path $env:TEMP "padmirror-runtime-check.txt"
 $runtimeRegistry = Join-Path $env:TEMP ("padmirror-runtime-registry-{0}.bin" -f [Guid]::NewGuid().ToString("N"))
 if (Test-Path $runtimeReport) { Remove-Item $runtimeReport -Force }
 $env:PADMIRROR_GST_REGISTRY = $runtimeRegistry
 try {
-    $runtimeCheck = Start-Process -FilePath $runtimeChecker `
-        -ArgumentList @("--report=$runtimeReport") -Wait -PassThru -NoNewWindow
-    $runtimeCheckExitCode = $runtimeCheck.ExitCode
+    Invoke-NativeProcess $runtimeChecker @("--report=$runtimeReport") `
+        "Packaged runtime check failed"
 } finally {
     Remove-Item Env:PADMIRROR_GST_REGISTRY -ErrorAction SilentlyContinue
     Remove-Item $runtimeRegistry -Force -ErrorAction SilentlyContinue
 }
-if ($runtimeCheckExitCode -ne 0 -or -not (Test-Path $runtimeReport)) {
+if (-not (Test-Path $runtimeReport)) {
     $details = if (Test-Path $runtimeReport) { Get-Content $runtimeReport -Raw } else { "No report was produced." }
     throw "Packaged runtime check failed:`n$details"
 }
+Assert-NoForbiddenPayload $releaseDir
 
 New-Item -ItemType Directory -Force -Path $distDir | Out-Null
 $portableDir = Join-Path $buildDir "portable-package"
-if (Test-Path $portableDir) { Remove-Item $portableDir -Recurse -Force }
+if (Test-Path $portableDir) {
+    try {
+        Remove-Item $portableDir -Recurse -Force -ErrorAction Stop
+    } catch {}
+}
 Copy-Item $releaseDir $portableDir -Recurse -Force
 $portableZip = Join-Path $distDir "PadMirror-portable.zip"
-if (Test-Path $portableZip) { Remove-Item $portableZip -Force }
+if (Test-Path $portableZip) {
+    try {
+        Remove-Item $portableZip -Force -ErrorAction Stop
+    } catch {
+        $portableZip = Join-Path $distDir ("PadMirror-portable-{0}.zip" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
+    }
+}
 Compress-Archive -Path (Join-Path $portableDir "*") -DestinationPath $portableZip -CompressionLevel Optimal
 
 if (-not $SkipInstaller) {
     $iscc = Find-InnoCompiler
     Require-Path $iscc "Inno Setup compiler"
-    & $iscc "/DReleaseDir=$releaseDir" "/DDistDir=$distDir" (Join-Path $repoRoot "installer\PadMirror.iss")
-    if ($LASTEXITCODE -ne 0) { throw "Inno Setup packaging failed" }
+    $installerScript = Join-Path $repoRoot "installer\PadMirror.iss"
+    $isccArguments = @(
+        "/DReleaseDir=$releaseDir",
+        "/DDistDir=$distDir",
+        $installerScript
+    )
+    Invoke-NativeProcess $iscc $isccArguments "Inno Setup packaging failed"
 }
 
-$artifacts = @($portableZip)
+$artifacts = @($exe, $runtimeChecker, $portableZip)
 if (-not $SkipInstaller) { $artifacts += (Join-Path $distDir "PadMirrorSetup.exe") }
 $checksumLines = foreach ($artifact in $artifacts) {
-    $hash = (Get-FileHash $artifact -Algorithm SHA256).Hash.ToLowerInvariant()
-    "$hash  $(Split-Path -Leaf $artifact)"
+    Require-Path $artifact "release artifact"
+    $hash = (Get-FileHashWithRetry $artifact).Hash.ToLowerInvariant()
+    $relativeName = if ($artifact.StartsWith($releaseDir, [StringComparison]::OrdinalIgnoreCase)) {
+        $artifact.Substring($releaseDir.Length).TrimStart('\', '/') -replace '\\', '/'
+    } else {
+        Split-Path -Leaf $artifact
+    }
+    "$hash  $relativeName"
 }
 $checksumLines | Set-Content (Join-Path $distDir "SHA256SUMS.txt") -Encoding ASCII
+Write-Host "Stage integrity manifest: $(Join-Path $distDir 'SHA256SUMS.txt')"
 
 Write-Host "PadMirror executable: $exe"
 Write-Host "Portable package: $portableZip"

@@ -1,121 +1,156 @@
 #include "app/Settings.h"
 
-#include <QSettings>
+#include "app/SettingsRepository.h"
+
+#include <QJsonObject>
 
 #include <algorithm>
+#include <array>
 #include <cstdlib>
 
 namespace padmirror::app {
 namespace {
 
-QSettings store() {
-    return QSettings(QStringLiteral("PadMirror"), QStringLiteral("PadMirror"));
+SettingsRepository& repository() {
+    static SettingsRepository instance;
+    return instance;
+}
+
+template <typename Enum>
+Enum enumValue(const QJsonObject& object, const char* key, Enum fallback, int maximum) {
+    const auto value = object.value(QLatin1String(key)).toInt(static_cast<int>(fallback));
+    return value >= 0 && value <= maximum ? static_cast<Enum>(value) : fallback;
 }
 
 } // namespace
 
 Settings::Settings(QObject* parent)
     : QObject(parent) {
+    repository().migrateLegacyQSettings();
     load();
 }
 
 Settings::ConnectionMode Settings::connectionMode() const { return connectionMode_; }
+Settings::AirPlayQuality Settings::airPlayQuality() const { return airPlayQuality_; }
 QString Settings::hardwareDecoder() const { return hardwareDecoder_; }
 int Settings::audioBufferMs() const { return audioBufferMs_; }
 Settings::AudioMode Settings::audioMode() const { return audioMode_; }
 QString Settings::audioDevice() const { return audioDevice_; }
 bool Settings::dropStaleFrames() const { return dropStaleFrames_; }
 bool Settings::gamingMode() const { return gamingMode_; }
-bool Settings::strictSync() const { return strictSync_; }
 bool Settings::maintainAspectRatio() const { return maintainAspectRatio_; }
 bool Settings::fullscreenOnLaunch() const { return fullscreenOnLaunch_; }
 bool Settings::alwaysOnTop() const { return alwaysOnTop_; }
 bool Settings::diagnosticsVisible() const { return diagnosticsVisible_; }
-QString Settings::uxplayPath() const { return uxplayPath_; }
 
 void Settings::setConnectionMode(ConnectionMode value) {
     if (connectionMode_ == value) return;
     connectionMode_ = value;
-    store().setValue(QStringLiteral("connection/mode"), static_cast<int>(value));
+    saveApp();
     emit connectionModeChanged();
+}
+
+void Settings::setAirPlayQuality(AirPlayQuality value) {
+    if (airPlayQuality_ == value) return;
+    airPlayQuality_ = value;
+    saveAirPlay();
+    emit airPlayQualityChanged();
 }
 
 void Settings::setHardwareDecoder(const QString& value) {
     if (hardwareDecoder_ == value) return;
     hardwareDecoder_ = value;
-    store().setValue(QStringLiteral("video/decoder"), value);
+    saveMedia();
     emit hardwareDecoderChanged();
 }
 
 void Settings::setAudioBufferMs(int value) {
-    const int allowed[] = {5, 10, 15, 20};
-    int normalized = 10;
+    constexpr std::array allowed = {5, 8, 10, 20, 35};
+    auto normalized = allowed.front();
     for (const auto candidate : allowed) {
         if (std::abs(candidate - value) < std::abs(normalized - value)) normalized = candidate;
     }
     if (audioBufferMs_ == normalized) return;
     audioBufferMs_ = normalized;
-    store().setValue(QStringLiteral("audio/bufferMs"), normalized);
+    saveMedia();
     emit audioBufferMsChanged();
 }
 
 void Settings::setAudioMode(AudioMode value) {
     if (audioMode_ == value) return;
     audioMode_ = value;
-    store().setValue(QStringLiteral("audio/mode"), static_cast<int>(value));
+    saveMedia();
     emit audioModeChanged();
 }
 
 void Settings::setAudioDevice(const QString& value) {
     if (audioDevice_ == value) return;
     audioDevice_ = value;
-    store().setValue(QStringLiteral("audio/device"), value);
+    saveMedia();
     emit audioDeviceChanged();
 }
 
-#define PADMIRROR_BOOL_SETTER(Name, Field, Key, Signal) \
+#define PADMIRROR_BOOL_SETTER(Name, Field, Save, Signal) \
     void Settings::Name(bool value) { \
         if (Field == value) return; \
         Field = value; \
-        store().setValue(QStringLiteral(Key), value); \
+        Save(); \
         emit Signal(); \
     }
 
-PADMIRROR_BOOL_SETTER(setDropStaleFrames, dropStaleFrames_, "video/dropStale", dropStaleFramesChanged)
-PADMIRROR_BOOL_SETTER(setGamingMode, gamingMode_, "general/gamingMode", gamingModeChanged)
-PADMIRROR_BOOL_SETTER(setStrictSync, strictSync_, "audio/strictSync", strictSyncChanged)
-PADMIRROR_BOOL_SETTER(setMaintainAspectRatio, maintainAspectRatio_, "display/aspect", maintainAspectRatioChanged)
-PADMIRROR_BOOL_SETTER(setFullscreenOnLaunch, fullscreenOnLaunch_, "display/fullscreen", fullscreenOnLaunchChanged)
-PADMIRROR_BOOL_SETTER(setAlwaysOnTop, alwaysOnTop_, "display/alwaysOnTop", alwaysOnTopChanged)
-PADMIRROR_BOOL_SETTER(setDiagnosticsVisible, diagnosticsVisible_, "debug/diagnostics", diagnosticsVisibleChanged)
+PADMIRROR_BOOL_SETTER(setDropStaleFrames, dropStaleFrames_, saveMedia, dropStaleFramesChanged)
+PADMIRROR_BOOL_SETTER(setGamingMode, gamingMode_, saveMedia, gamingModeChanged)
+PADMIRROR_BOOL_SETTER(setMaintainAspectRatio, maintainAspectRatio_, saveMedia, maintainAspectRatioChanged)
+PADMIRROR_BOOL_SETTER(setFullscreenOnLaunch, fullscreenOnLaunch_, saveApp, fullscreenOnLaunchChanged)
+PADMIRROR_BOOL_SETTER(setAlwaysOnTop, alwaysOnTop_, saveApp, alwaysOnTopChanged)
+PADMIRROR_BOOL_SETTER(setDiagnosticsVisible, diagnosticsVisible_, saveApp, diagnosticsVisibleChanged)
 
 #undef PADMIRROR_BOOL_SETTER
 
-void Settings::setUxplayPath(const QString& value) {
-    if (uxplayPath_ == value) return;
-    uxplayPath_ = value;
-    store().setValue(QStringLiteral("wifi/uxplayPath"), value);
-    emit uxplayPathChanged();
+void Settings::load() {
+    const auto app = repository().app();
+    const auto airPlay = repository().airPlay();
+    const auto media = repository().media();
+    connectionMode_ = enumValue(app, "connectionMode", ConnectionMode::UsbGaming, 1);
+    airPlayQuality_ = enumValue(airPlay, "quality", AirPlayQuality::Auto, 1);
+    hardwareDecoder_ = media.value(QStringLiteral("hardwareDecoder")).toString(hardwareDecoder_);
+    audioBufferMs_ = media.value(QStringLiteral("audioBufferMs")).toInt(audioBufferMs_);
+    audioMode_ = enumValue(media, "audioMode", AudioMode::LowLatency, 2);
+    audioDevice_ = media.value(QStringLiteral("audioDevice")).toString();
+    dropStaleFrames_ = media.value(QStringLiteral("dropStaleFrames")).toBool(true);
+    gamingMode_ = media.value(QStringLiteral("gamingMode")).toBool(true);
+    maintainAspectRatio_ = media.value(QStringLiteral("maintainAspectRatio")).toBool(true);
+    fullscreenOnLaunch_ = app.value(QStringLiteral("fullscreenOnLaunch")).toBool(false);
+    alwaysOnTop_ = app.value(QStringLiteral("alwaysOnTop")).toBool(false);
+    diagnosticsVisible_ = app.value(QStringLiteral("diagnosticsVisible")).toBool(false);
+    setAudioBufferMs(audioBufferMs_);
 }
 
-void Settings::load() {
-    auto settings = store();
-    connectionMode_ = static_cast<ConnectionMode>(settings.value(
-        QStringLiteral("connection/mode"), static_cast<int>(connectionMode_)).toInt());
-    hardwareDecoder_ = settings.value(QStringLiteral("video/decoder"), hardwareDecoder_).toString();
-    audioBufferMs_ = settings.value(QStringLiteral("audio/bufferMs"), audioBufferMs_).toInt();
-    audioMode_ = static_cast<AudioMode>(settings.value(
-        QStringLiteral("audio/mode"), static_cast<int>(audioMode_)).toInt());
-    audioDevice_ = settings.value(QStringLiteral("audio/device"), audioDevice_).toString();
-    dropStaleFrames_ = settings.value(QStringLiteral("video/dropStale"), true).toBool();
-    gamingMode_ = settings.value(QStringLiteral("general/gamingMode"), true).toBool();
-    strictSync_ = settings.value(QStringLiteral("audio/strictSync"), false).toBool();
-    maintainAspectRatio_ = settings.value(QStringLiteral("display/aspect"), true).toBool();
-    fullscreenOnLaunch_ = settings.value(QStringLiteral("display/fullscreen"), false).toBool();
-    alwaysOnTop_ = settings.value(QStringLiteral("display/alwaysOnTop"), false).toBool();
-    diagnosticsVisible_ = settings.value(QStringLiteral("debug/diagnostics"), false).toBool();
-    uxplayPath_ = settings.value(QStringLiteral("wifi/uxplayPath")).toString();
-    setAudioBufferMs(audioBufferMs_);
+void Settings::saveApp() const {
+    repository().saveApp({
+        {QStringLiteral("connectionMode"), static_cast<int>(connectionMode_)},
+        {QStringLiteral("fullscreenOnLaunch"), fullscreenOnLaunch_},
+        {QStringLiteral("alwaysOnTop"), alwaysOnTop_},
+        {QStringLiteral("diagnosticsVisible"), diagnosticsVisible_},
+    });
+}
+
+void Settings::saveAirPlay() const {
+    repository().saveAirPlay({
+        {QStringLiteral("quality"), static_cast<int>(airPlayQuality_)},
+    });
+}
+
+void Settings::saveMedia() const {
+    repository().saveMedia({
+        {QStringLiteral("hardwareDecoder"), hardwareDecoder_},
+        {QStringLiteral("audioBufferMs"), audioBufferMs_},
+        {QStringLiteral("audioMode"), static_cast<int>(audioMode_)},
+        {QStringLiteral("audioDevice"), audioDevice_},
+        {QStringLiteral("dropStaleFrames"), dropStaleFrames_},
+        {QStringLiteral("gamingMode"), gamingMode_},
+        {QStringLiteral("maintainAspectRatio"), maintainAspectRatio_},
+    });
 }
 
 } // namespace padmirror::app
