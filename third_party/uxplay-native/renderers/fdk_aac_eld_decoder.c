@@ -10,6 +10,9 @@
 
 #define FDK_TT_MP4_RAW 0
 #define FDK_AAC_DEC_OK 0
+#define FDK_AAC_DEC_CONCEAL 1
+#define FDK_AAC_DEC_DECODE_ERROR_START 0x4000
+#define FDK_AAC_DEC_DECODE_ERROR_END 0x4fff
 #define FDK_MAX_SAMPLES_PER_FRAME 2048
 #define FDK_MAX_CHANNELS 8
 #define FDK_PCM_CAPACITY (FDK_MAX_SAMPLES_PER_FRAME * FDK_MAX_CHANNELS)
@@ -154,38 +157,22 @@ int fdk_aac_eld_decoder_reset(fdk_aac_eld_decoder_t *decoder, char *error, size_
     return decoder ? open_handle(decoder, error, error_size) : 0;
 }
 
-int fdk_aac_eld_decoder_decode(fdk_aac_eld_decoder_t *decoder,
-                               const uint8_t *data,
-                               size_t data_len,
-                               const int16_t **pcm,
-                               size_t *sample_count,
-                               int *sample_rate,
-                               int *channels,
-                               int *frame_size,
-                               char *error,
-                               size_t error_size)
+static int collect_output(fdk_aac_eld_decoder_t *decoder,
+                          int result,
+                          const int16_t **pcm,
+                          size_t *sample_count,
+                          int *sample_rate,
+                          int *channels,
+                          int *frame_size,
+                          char *error,
+                          size_t error_size)
 {
-    unsigned char *input[1];
-    const unsigned int input_size[1] = {(unsigned int)data_len};
-    unsigned int bytes_valid = (unsigned int)data_len;
     fdk_stream_info_t *info;
     size_t total;
-    int result;
 
-    if (!decoder || !decoder->handle || !data || data_len == 0 || !pcm || !sample_count) {
-        set_error(error, error_size, "invalid AAC-ELD decoder input", -1);
-        return 0;
-    }
-
-    input[0] = (unsigned char *)(uintptr_t)data;
-    result = decoder->fill(decoder->handle, input, input_size, &bytes_valid);
-    if (result != FDK_AAC_DEC_OK) {
-        set_error(error, error_size, "aacDecoder_Fill failed", result);
-        return 0;
-    }
-
-    result = decoder->decode_frame(decoder->handle, decoder->pcm, FDK_PCM_CAPACITY, 0);
-    if (result != FDK_AAC_DEC_OK) {
+    if (result != FDK_AAC_DEC_OK &&
+        (result < FDK_AAC_DEC_DECODE_ERROR_START ||
+         result > FDK_AAC_DEC_DECODE_ERROR_END)) {
         set_error(error, error_size, "aacDecoder_DecodeFrame failed", result);
         return 0;
     }
@@ -206,5 +193,61 @@ int fdk_aac_eld_decoder_decode(fdk_aac_eld_decoder_t *decoder,
     if (sample_rate) *sample_rate = info->sample_rate;
     if (channels) *channels = info->channels;
     if (frame_size) *frame_size = info->frame_size;
+    if (error && error_size) error[0] = '\0';
     return 1;
+}
+
+int fdk_aac_eld_decoder_decode(fdk_aac_eld_decoder_t *decoder,
+                               const uint8_t *data,
+                               size_t data_len,
+                               const int16_t **pcm,
+                               size_t *sample_count,
+                               int *sample_rate,
+                               int *channels,
+                               int *frame_size,
+                               char *error,
+                               size_t error_size)
+{
+    unsigned char *input[1];
+    const unsigned int input_size[1] = {(unsigned int)data_len};
+    unsigned int bytes_valid = (unsigned int)data_len;
+    int result;
+
+    if (!decoder || !decoder->handle || !data || data_len == 0 || !pcm || !sample_count) {
+        set_error(error, error_size, "invalid AAC-ELD decoder input", -1);
+        return 0;
+    }
+
+    input[0] = (unsigned char *)(uintptr_t)data;
+    result = decoder->fill(decoder->handle, input, input_size, &bytes_valid);
+    if (result != FDK_AAC_DEC_OK) {
+        set_error(error, error_size, "aacDecoder_Fill failed", result);
+        return 0;
+    }
+
+    result = decoder->decode_frame(decoder->handle, decoder->pcm, FDK_PCM_CAPACITY, 0);
+    return collect_output(decoder, result, pcm, sample_count, sample_rate,
+                          channels, frame_size, error, error_size);
+}
+
+int fdk_aac_eld_decoder_conceal(fdk_aac_eld_decoder_t *decoder,
+                                const int16_t **pcm,
+                                size_t *sample_count,
+                                int *sample_rate,
+                                int *channels,
+                                int *frame_size,
+                                char *error,
+                                size_t error_size)
+{
+    int result;
+
+    if (!decoder || !decoder->handle || !pcm || !sample_count) {
+        set_error(error, error_size, "invalid AAC-ELD concealment request", -1);
+        return 0;
+    }
+
+    result = decoder->decode_frame(decoder->handle, decoder->pcm,
+                                   FDK_PCM_CAPACITY, FDK_AAC_DEC_CONCEAL);
+    return collect_output(decoder, result, pcm, sample_count, sample_rate,
+                          channels, frame_size, error, error_size);
 }

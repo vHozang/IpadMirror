@@ -46,8 +46,39 @@ static bool hls_video = false;
 static bool use_x11 = false;
 #endif
 static bool logger_debug = false;
+static bool video_discontinuity = true;
 static uintptr_t native_window_handle = 0;
 static GstBusSyncReply video_renderer_bus_sync(GstBus *bus, GstMessage *message, gpointer user_data);
+
+#define VIDEO_STATS_INTERVAL_NS (2 * GST_SECOND)
+
+typedef struct video_stats_state_s {
+    GMutex mutex;
+    GstClockTime window_start_ns;
+    GstClockTime last_input_pts;
+    GstClockTime last_sink_pts;
+    GstClockTime input_pts_delta_total;
+    GstClockTime sink_pts_delta_total;
+    uint64_t input_pts_delta_samples;
+    uint64_t sink_pts_delta_samples;
+    int64_t sink_pts_lead_ns;
+    uint64_t input_frames;
+    uint64_t sink_frames;
+    uint64_t queue_dropped;
+    uint64_t qos_processed;
+    uint64_t qos_dropped;
+    uint64_t appsrc_failures;
+    uint64_t generation;
+    double input_fps;
+    double sink_fps;
+    double input_pts_delta_ms;
+    double sink_pts_delta_ms;
+    double sink_pts_lead_ms;
+    unsigned int queue_buffers;
+} video_stats_state_t;
+
+static video_stats_state_t video_stats;
+static gsize video_stats_initialized = 0;
 static gint64 hls_requested_start_position = 0;
 static gint64 hls_seek_start = 0;
 static gint64 hls_seek_end = 0;
@@ -80,13 +111,14 @@ typedef enum {
 #define NCODECS  3   /* renderers for h264,h265, and jpeg images */
 
 struct video_renderer_s {
-    GstElement *appsrc, *pipeline, *textsrc, *videosink;
+    GstElement *appsrc, *pipeline, *decoder, *converter, *queue, *textsrc, *videosink;
     GstBus *bus;
     const char *codec;
     bool autovideo;
     int id;
     char *uri;
     gboolean eos;
+    gboolean pipeline_details_logged;
     gint64 duration;
     gint buffering_level;
 #ifdef  X_DISPLAY_FIX
@@ -103,6 +135,230 @@ static char h264[] = "h264";
 static char h265[] = "h265";
 static char hls[]  = "hls";
 static char jpeg[] = "jpeg";
+
+static void video_stats_init(void) {
+    if (g_once_init_enter(&video_stats_initialized)) {
+        g_mutex_init(&video_stats.mutex);
+        g_once_init_leave(&video_stats_initialized, 1);
+    }
+}
+
+static void video_stats_reset(void) {
+    video_stats_init();
+    g_mutex_lock(&video_stats.mutex);
+    video_stats.window_start_ns = GST_CLOCK_TIME_NONE;
+    video_stats.last_input_pts = GST_CLOCK_TIME_NONE;
+    video_stats.last_sink_pts = GST_CLOCK_TIME_NONE;
+    video_stats.input_pts_delta_total = 0;
+    video_stats.sink_pts_delta_total = 0;
+    video_stats.input_pts_delta_samples = 0;
+    video_stats.sink_pts_delta_samples = 0;
+    video_stats.sink_pts_lead_ns = 0;
+    video_stats.input_frames = 0;
+    video_stats.sink_frames = 0;
+    video_stats.queue_dropped = 0;
+    video_stats.qos_processed = 0;
+    video_stats.qos_dropped = 0;
+    video_stats.appsrc_failures = 0;
+    video_stats.input_fps = 0.0;
+    video_stats.sink_fps = 0.0;
+    video_stats.input_pts_delta_ms = 0.0;
+    video_stats.sink_pts_delta_ms = 0.0;
+    video_stats.sink_pts_lead_ms = 0.0;
+    video_stats.queue_buffers = 0;
+    video_stats.generation++;
+    g_mutex_unlock(&video_stats.mutex);
+}
+
+static void video_stats_set_queue_level_locked(video_renderer_t *candidate) {
+    guint queue_buffers = 0;
+    if (!candidate || !candidate->queue) {
+        video_stats.queue_buffers = 0;
+        return;
+    }
+    g_object_get(candidate->queue, "current-level-buffers", &queue_buffers, NULL);
+    video_stats.queue_buffers = queue_buffers;
+}
+
+static void video_stats_log_window(video_renderer_t *candidate, GstClockTime now) {
+    if (!GST_CLOCK_TIME_IS_VALID(video_stats.window_start_ns)) {
+        video_stats.window_start_ns = now;
+        return;
+    }
+    const GstClockTime elapsed = now - video_stats.window_start_ns;
+    if (elapsed < VIDEO_STATS_INTERVAL_NS) {
+        return;
+    }
+
+    const double seconds = (double)elapsed / GST_SECOND;
+    video_stats.input_fps = video_stats.input_frames / seconds;
+    video_stats.sink_fps = video_stats.sink_frames / seconds;
+    video_stats.input_pts_delta_ms = video_stats.input_pts_delta_samples
+        ? ((double)video_stats.input_pts_delta_total /
+           video_stats.input_pts_delta_samples) / GST_MSECOND
+        : 0.0;
+    video_stats.sink_pts_delta_ms = video_stats.sink_pts_delta_samples
+        ? ((double)video_stats.sink_pts_delta_total /
+           video_stats.sink_pts_delta_samples) / GST_MSECOND
+        : 0.0;
+    video_stats.sink_pts_lead_ms =
+        (double)video_stats.sink_pts_lead_ns / GST_MSECOND;
+    video_stats_set_queue_level_locked(candidate);
+    logger_log(logger, LOGGER_INFO,
+               "Video cadence input=%.1f fps sink=%.1f fps pts=%.1f/%.1f ms lead=%.1f ms queue=%u queue-overruns=%llu qos=%llu/%llu appsrc-failures=%llu",
+               video_stats.input_fps,
+               video_stats.sink_fps,
+               video_stats.input_pts_delta_ms,
+               video_stats.sink_pts_delta_ms,
+               video_stats.sink_pts_lead_ms,
+               video_stats.queue_buffers,
+               (unsigned long long)video_stats.queue_dropped,
+               (unsigned long long)video_stats.qos_processed,
+               (unsigned long long)video_stats.qos_dropped,
+               (unsigned long long)video_stats.appsrc_failures);
+    video_stats.window_start_ns = now;
+    video_stats.input_frames = 0;
+    video_stats.sink_frames = 0;
+    video_stats.input_pts_delta_total = 0;
+    video_stats.sink_pts_delta_total = 0;
+    video_stats.input_pts_delta_samples = 0;
+    video_stats.sink_pts_delta_samples = 0;
+    video_stats.generation++;
+}
+
+static void video_queue_overrun(GstElement *queue, gpointer user_data) {
+    (void)queue;
+    (void)user_data;
+    video_stats_init();
+    g_mutex_lock(&video_stats.mutex);
+    video_stats.queue_dropped++;
+    g_mutex_unlock(&video_stats.mutex);
+}
+
+static void video_log_pipeline_details(video_renderer_t *candidate);
+
+static GstPadProbeReturn video_sink_probe(GstPad *pad, GstPadProbeInfo *info, gpointer user_data) {
+    (void)pad;
+    video_renderer_t *candidate = (video_renderer_t *)user_data;
+    if (!(GST_PAD_PROBE_INFO_TYPE(info) & GST_PAD_PROBE_TYPE_BUFFER)) {
+        return GST_PAD_PROBE_OK;
+    }
+
+    video_log_pipeline_details(candidate);
+    GstBuffer *buffer = GST_PAD_PROBE_INFO_BUFFER(info);
+    const GstClockTime pts = buffer ? GST_BUFFER_PTS(buffer) : GST_CLOCK_TIME_NONE;
+    const GstClockTime now = gst_util_get_timestamp();
+    g_mutex_lock(&video_stats.mutex);
+    video_stats.sink_frames++;
+    if (GST_CLOCK_TIME_IS_VALID(pts)) {
+        if (GST_CLOCK_TIME_IS_VALID(video_stats.last_sink_pts) &&
+            pts > video_stats.last_sink_pts) {
+            video_stats.sink_pts_delta_total += pts - video_stats.last_sink_pts;
+            video_stats.sink_pts_delta_samples++;
+        }
+        video_stats.last_sink_pts = pts;
+        if (candidate && candidate->pipeline) {
+            const GstClockTime running_time =
+                gst_element_get_current_running_time(candidate->pipeline);
+            if (GST_CLOCK_TIME_IS_VALID(running_time)) {
+                video_stats.sink_pts_lead_ns = GST_CLOCK_DIFF(running_time, pts);
+            }
+        }
+    }
+    video_stats_log_window(candidate, now);
+    g_mutex_unlock(&video_stats.mutex);
+    return GST_PAD_PROBE_OK;
+}
+
+static void video_log_pad_caps(GstElement *element, const char *pad_name,
+                               const char *label)
+{
+    if (!element || !pad_name || !label) {
+        return;
+    }
+    GstPad *pad = gst_element_get_static_pad(element, pad_name);
+    if (!pad) {
+        return;
+    }
+    GstCaps *caps = gst_pad_get_current_caps(pad);
+    if (!caps) {
+        caps = gst_pad_query_caps(pad, NULL);
+    }
+    if (caps) {
+        gchar *text = gst_caps_to_string(caps);
+        logger_log(logger, LOGGER_INFO, "Video negotiated %s: %s", label,
+                   text ? text : "unknown");
+        g_free(text);
+        gst_caps_unref(caps);
+    }
+    gst_object_unref(pad);
+}
+
+static void video_log_device_properties(GstElement *element, const char *label)
+{
+    if (!element || !label) {
+        return;
+    }
+    GObjectClass *klass = G_OBJECT_GET_CLASS(element);
+    gint adapter = -1;
+    guint64 adapter_luid = 0;
+    guint vendor_id = 0;
+    guint device_id = 0;
+    if (g_object_class_find_property(klass, "adapter")) {
+        g_object_get(element, "adapter", &adapter, NULL);
+    }
+    if (g_object_class_find_property(klass, "adapter-luid")) {
+        g_object_get(element, "adapter-luid", &adapter_luid, NULL);
+    }
+    if (g_object_class_find_property(klass, "vendor-id")) {
+        g_object_get(element, "vendor-id", &vendor_id, NULL);
+    }
+    if (g_object_class_find_property(klass, "device-id")) {
+        g_object_get(element, "device-id", &device_id, NULL);
+    }
+    logger_log(logger, LOGGER_INFO,
+               "Video D3D11 %s adapter=%d luid=0x%llx vendor=0x%04x device=0x%04x",
+               label, adapter, (unsigned long long)adapter_luid,
+               vendor_id, device_id);
+}
+
+static void video_log_pipeline_details(video_renderer_t *candidate)
+{
+    if (!candidate || candidate->pipeline_details_logged) {
+        return;
+    }
+    candidate->pipeline_details_logged = TRUE;
+    video_log_pad_caps(candidate->decoder, "src", "decoder src");
+    video_log_pad_caps(candidate->converter, "src", "converter src");
+    video_log_pad_caps(candidate->queue, "src", "queue src");
+    video_log_pad_caps(candidate->videosink, "sink", "sink input");
+    video_log_device_properties(candidate->decoder, "decoder");
+    video_log_device_properties(candidate->converter, "converter");
+    video_log_device_properties(candidate->videosink, "sink");
+}
+
+static bool contains_keyframe(const unsigned char *data, int data_len, const char *codec) {
+    if (!data || data_len < 5 || !codec) {
+        return false;
+    }
+    for (int index = 0; index + 4 < data_len; ++index) {
+        if (data[index] != 0x00 || data[index + 1] != 0x00 ||
+            data[index + 2] != 0x00 || data[index + 3] != 0x01) {
+            continue;
+        }
+        const unsigned char header = data[index + 4];
+        if (!strcmp(codec, h265)) {
+            const int nal_type = (header >> 1) & 0x3f;
+            if (nal_type >= 16 && nal_type <= 21) {
+                return true;
+            }
+        } else if ((header & 0x1f) == 5) {
+            return true;
+        }
+        index += 4;
+    }
+    return false;
+}
 
 static void append_videoflip (GString *launch, const videoflip_t *flip, const videoflip_t *rot) {
     /* videoflip image transform */
@@ -257,9 +513,10 @@ g_string_replace (GString     *string,
 #endif
 
 void video_renderer_init(logger_t *render_logger, const char *server_name, videoflip_t videoflip[2], const char *parser, const char * rtp_pipeline,
-                          const char *decoder, const char *converter, const char *videosink, const char *videosink_options, 
+                          const char *decoder, const char *converter, const char *videosink, const char *videosink_options,
                           bool initial_fullscreen, bool video_sync, bool h265_support, bool coverart_support, guint playbin_version, const char *uri) {
     GError *error = NULL;
+    video_stats_reset();
     GstCaps *caps = NULL;
     bool rtp = (bool) strlen(rtp_pipeline);
     hls_video = (uri != NULL);
@@ -312,10 +569,14 @@ void video_renderer_init(logger_t *render_logger, const char *server_name, video
         renderer_type[i]->id = i;
         renderer_type[i]->bus = NULL;
         renderer_type[i]->appsrc = NULL;
+        renderer_type[i]->decoder = NULL;
+        renderer_type[i]->converter = NULL;
+        renderer_type[i]->queue = NULL;
         renderer_type[i]->textsrc = NULL;
         renderer_type[i]->videosink = NULL;
         renderer_type[i]->uri = NULL;
         renderer_type[i]->eos = FALSE;
+        renderer_type[i]->pipeline_details_logged = FALSE;
         if (hls_video) {
             renderer_type[i]->uri = (char *) calloc(strlen(uri) + 1, sizeof(char));
             memcpy(renderer_type[i]->uri, uri, strlen(uri));
@@ -369,11 +630,11 @@ void video_renderer_init(logger_t *render_logger, const char *server_name, video
             if (jpeg_pipeline) {
                 g_string_append(launch, "jpegdec ");
             } else {
-                g_string_append(launch, "queue ! ");
                 g_string_append(launch, parser);
-                g_string_append(launch, " ! ");
+                g_string_append(launch, " config-interval=-1 disable-passthrough=true ! ");
                 if (!rtp) {
                     g_string_append(launch, decoder);
+                    g_string_append(launch, " name=video_decoder");
                 } else {
                     g_string_append(launch, "rtph264pay ");
                     g_string_append(launch, rtp_pipeline);
@@ -383,8 +644,10 @@ void video_renderer_init(logger_t *render_logger, const char *server_name, video
                 g_string_append(launch, " ! ");
                 append_videoflip(launch, &videoflip[0], &videoflip[1]);
                 g_string_append(launch, converter);
-                g_string_append(launch, " ! ");
-                g_string_append(launch, "videoscale ! ");
+                g_string_append(launch, " name=video_converter ! ");
+                if (!jpeg_pipeline) {
+                    g_string_append(launch, "queue name=video_live_queue max-size-buffers=3 max-size-bytes=0 max-size-time=0 leaky=downstream ! ");
+                }
                 if (jpeg_pipeline) {
                     g_string_append(launch, " imagefreeze allow-replace=TRUE ! textoverlay name=metadata_overlay ! ");
                 }
@@ -434,12 +697,39 @@ void video_renderer_init(logger_t *render_logger, const char *server_name, video
             gst_pipeline_use_clock(GST_PIPELINE_CAST(renderer_type[i]->pipeline), clock);
             renderer_type[i]->appsrc = gst_bin_get_by_name (GST_BIN (renderer_type[i]->pipeline), "video_source");
             g_assert(renderer_type[i]->appsrc);
+            renderer_type[i]->decoder = gst_bin_get_by_name(GST_BIN(renderer_type[i]->pipeline), "video_decoder");
+            renderer_type[i]->converter = gst_bin_get_by_name(GST_BIN(renderer_type[i]->pipeline), "video_converter");
+            renderer_type[i]->queue = gst_bin_get_by_name(GST_BIN(renderer_type[i]->pipeline), "video_live_queue");
+            if (renderer_type[i]->queue) {
+                g_signal_connect(renderer_type[i]->queue, "overrun",
+                                 G_CALLBACK(video_queue_overrun), renderer_type[i]);
+            }
+            if (renderer_type[i]->decoder) {
+                GObjectClass *decoder_class = G_OBJECT_GET_CLASS(renderer_type[i]->decoder);
+                if (g_object_class_find_property(decoder_class, "low-latency")) {
+                    g_object_set(renderer_type[i]->decoder, "low-latency", TRUE, NULL);
+                }
+                if (g_object_class_find_property(decoder_class, "max-display-delay")) {
+                    g_object_set(renderer_type[i]->decoder, "max-display-delay", 0, NULL);
+                }
+                if (g_object_class_find_property(decoder_class, "discard-corrupted-frames")) {
+                    g_object_set(renderer_type[i]->decoder, "discard-corrupted-frames", FALSE, NULL);
+                }
+            }
             gchar *sink_name = g_strdup_printf("%s_%s", videosink, renderer_type[i]->codec);
             renderer_type[i]->videosink = gst_bin_get_by_name(GST_BIN(renderer_type[i]->pipeline), sink_name);
             g_free(sink_name);
-            if (renderer_type[i]->videosink && native_window_handle && GST_IS_VIDEO_OVERLAY(renderer_type[i]->videosink)) {
-                gst_video_overlay_set_window_handle(GST_VIDEO_OVERLAY(renderer_type[i]->videosink),
-                                                    (guintptr)native_window_handle);
+            if (renderer_type[i]->videosink) {
+                GstPad *sink_pad = gst_element_get_static_pad(renderer_type[i]->videosink, "sink");
+                if (sink_pad) {
+                    gst_pad_add_probe(sink_pad, GST_PAD_PROBE_TYPE_BUFFER,
+                                      video_sink_probe, renderer_type[i], NULL);
+                    gst_object_unref(sink_pad);
+                }
+                if (native_window_handle && GST_IS_VIDEO_OVERLAY(renderer_type[i]->videosink)) {
+                    gst_video_overlay_set_window_handle(GST_VIDEO_OVERLAY(renderer_type[i]->videosink),
+                                                        (guintptr)native_window_handle);
+                }
             }
             g_object_set(renderer_type[i]->appsrc, "caps", caps, "stream-type", 0, "is-live", TRUE, "format", GST_FORMAT_TIME, NULL);
             g_string_free(launch, TRUE);
@@ -500,9 +790,42 @@ void video_renderer_init(logger_t *render_logger, const char *server_name, video
     }
 }
 
+static void video_stats_handle_qos(GstMessage *message) {
+    gboolean live = FALSE;
+    guint64 running_time = 0;
+    guint64 stream_time = 0;
+    guint64 timestamp = 0;
+    guint64 duration = 0;
+    GstFormat format = GST_FORMAT_UNDEFINED;
+    guint64 processed = 0;
+    guint64 dropped = 0;
+
+    gst_message_parse_qos(message, &live, &running_time, &stream_time,
+                          &timestamp, &duration);
+    gst_message_parse_qos_stats(message, &format, &processed, &dropped);
+    video_stats_init();
+    g_mutex_lock(&video_stats.mutex);
+    const uint64_t previous_dropped = video_stats.qos_dropped;
+    video_stats.qos_processed = processed;
+    video_stats.qos_dropped = dropped;
+    g_mutex_unlock(&video_stats.mutex);
+
+    if (dropped > previous_dropped) {
+        logger_log(logger, LOGGER_WARNING,
+                   "GStreamer video QoS source=%s live=%d processed=%llu dropped=%llu timestamp=%.6f s",
+                   GST_MESSAGE_SRC_NAME(message), live,
+                   (unsigned long long)processed,
+                   (unsigned long long)dropped,
+                   (double)timestamp / GST_SECOND);
+    }
+}
+
 static GstBusSyncReply video_renderer_bus_sync(GstBus *bus, GstMessage *message, gpointer user_data) {
     video_renderer_t *candidate = (video_renderer_t *)user_data;
     (void)bus;
+    if (GST_MESSAGE_TYPE(message) == GST_MESSAGE_QOS) {
+        video_stats_handle_qos(message);
+    }
     if (gst_is_video_overlay_prepare_window_handle_message(message) &&
         candidate && native_window_handle && GST_IS_VIDEO_OVERLAY(GST_MESSAGE_SRC(message))) {
         gst_video_overlay_set_window_handle(GST_VIDEO_OVERLAY(GST_MESSAGE_SRC(message)),
@@ -567,6 +890,8 @@ void video_renderer_start() {
     }
     renderer = NULL;
     first_packet = true;
+    video_discontinuity = true;
+    video_stats_reset();
 #ifdef X_DISPLAY_FIX
     X11_search_attempts = 0;
 #endif
@@ -683,8 +1008,36 @@ uint64_t video_renderer_render_buffer(unsigned char* data, int *data_len, int *n
         if (sync) {
             GST_BUFFER_PTS(buffer) = pts;
         }
+        if (!contains_keyframe(data, *data_len, renderer->codec)) {
+            GST_BUFFER_FLAG_SET(buffer, GST_BUFFER_FLAG_DELTA_UNIT);
+        }
+        if (video_discontinuity) {
+            GST_BUFFER_FLAG_SET(buffer, GST_BUFFER_FLAG_DISCONT);
+            video_discontinuity = false;
+        }
         gst_buffer_fill(buffer, 0, data, *data_len);
-        gst_app_src_push_buffer (GST_APP_SRC(renderer->appsrc), buffer);
+        const GstFlowReturn flow = gst_app_src_push_buffer(GST_APP_SRC(renderer->appsrc), buffer);
+        const GstClockTime now = gst_util_get_timestamp();
+        g_mutex_lock(&video_stats.mutex);
+        video_stats.input_frames++;
+        if (GST_CLOCK_TIME_IS_VALID(pts) &&
+            GST_CLOCK_TIME_IS_VALID(video_stats.last_input_pts) &&
+            pts > video_stats.last_input_pts) {
+            video_stats.input_pts_delta_total += pts - video_stats.last_input_pts;
+            video_stats.input_pts_delta_samples++;
+        }
+        video_stats.last_input_pts = pts;
+        if (flow != GST_FLOW_OK) {
+            video_stats.appsrc_failures++;
+        }
+        video_stats_log_window(renderer, now);
+        g_mutex_unlock(&video_stats.mutex);
+        if (flow != GST_FLOW_OK) {
+            logger_log(logger, LOGGER_WARNING,
+                       "GStreamer video appsrc rejected buffer: %s",
+                       gst_flow_get_name(flow));
+            video_discontinuity = true;
+        }
 #ifdef X_DISPLAY_FIX
         if (renderer->gst_window && !(renderer->gst_window->window) && renderer->use_x11) {
             X11_search_attempts++;
@@ -703,6 +1056,37 @@ uint64_t video_renderer_render_buffer(unsigned char* data, int *data_len, int *n
 }
 
 void video_renderer_flush() {
+    if (!renderer || !renderer->pipeline) {
+        video_discontinuity = true;
+        video_stats_reset();
+        return;
+    }
+    gst_element_send_event(renderer->pipeline, gst_event_new_flush_start());
+    gst_element_send_event(renderer->pipeline, gst_event_new_flush_stop(FALSE));
+    gst_video_pipeline_base_time = gst_element_get_base_time(renderer->appsrc);
+    video_discontinuity = true;
+    video_stats_reset();
+}
+
+bool video_renderer_get_stats(video_renderer_stats_t *stats) {
+    if (!stats) {
+        return false;
+    }
+    video_stats_init();
+    g_mutex_lock(&video_stats.mutex);
+    stats->input_fps = video_stats.input_fps;
+    stats->sink_fps = video_stats.sink_fps;
+    stats->queue_buffers = video_stats.queue_buffers;
+    stats->queue_dropped = video_stats.queue_dropped;
+    stats->qos_processed = video_stats.qos_processed;
+    stats->qos_dropped = video_stats.qos_dropped;
+    stats->appsrc_failures = video_stats.appsrc_failures;
+    stats->input_pts_delta_ms = video_stats.input_pts_delta_ms;
+    stats->sink_pts_delta_ms = video_stats.sink_pts_delta_ms;
+    stats->sink_pts_lead_ms = video_stats.sink_pts_lead_ms;
+    stats->generation = video_stats.generation;
+    g_mutex_unlock(&video_stats.mutex);
+    return true;
 }
 
 void video_renderer_hls_ready() {
@@ -777,6 +1161,18 @@ static void video_renderer_destroy_instance(video_renderer_t *renderer) {
         if (renderer->appsrc) {
             gst_object_unref (renderer->appsrc);
             renderer->appsrc = NULL;
+        }
+        if (renderer->decoder) {
+            gst_object_unref(renderer->decoder);
+            renderer->decoder = NULL;
+        }
+        if (renderer->converter) {
+            gst_object_unref(renderer->converter);
+            renderer->converter = NULL;
+        }
+        if (renderer->queue) {
+            gst_object_unref(renderer->queue);
+            renderer->queue = NULL;
         }
         if (renderer->textsrc) {
             gst_object_unref (renderer->textsrc);
@@ -928,6 +1324,9 @@ static gboolean gstreamer_video_pipeline_bus_callback(GstBus *bus, GstMessage *m
     }
 
     switch (GST_MESSAGE_TYPE (message)) {
+    case GST_MESSAGE_QOS:
+        /* The synchronous bus handler records QoS even without a GLib watch. */
+        break;
     case GST_MESSAGE_DURATION:
         hls_duration = GST_CLOCK_TIME_NONE;
         break;

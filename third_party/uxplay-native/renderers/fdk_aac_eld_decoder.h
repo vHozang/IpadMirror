@@ -29,6 +29,14 @@ int fdk_aac_eld_decoder_decode(fdk_aac_eld_decoder_t *decoder,
                                int *frame_size,
                                char *error,
                                size_t error_size);
+int fdk_aac_eld_decoder_conceal(fdk_aac_eld_decoder_t *decoder,
+                                const int16_t **pcm,
+                                size_t *sample_count,
+                                int *sample_rate,
+                                int *channels,
+                                int *frame_size,
+                                char *error,
+                                size_t error_size);
 
 #ifdef __cplusplus
 }

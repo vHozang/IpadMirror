@@ -34,6 +34,21 @@
 #include "byteutils.h"
 
 #define RAOP_BUFFER_LENGTH 256
+#define RAOP_RESEND_INTERVAL_US 10000ULL
+#define RAOP_RESEND_DEADLINE_US 30000ULL
+
+static uint64_t
+monotonic_time_us(void)
+{
+#ifdef _WIN32
+    return GetTickCount64() * 1000ULL;
+#else
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (uint64_t) now.tv_sec * 1000000ULL +
+           (uint64_t) now.tv_nsec / 1000ULL;
+#endif
+}
 
 typedef struct {
     /* Data available */
@@ -62,6 +77,11 @@ struct raop_buffer_s {
 
     /* RTP buffer entries */
     raop_buffer_entry_t entries[RAOP_BUFFER_LENGTH];
+
+    uint64_t missing_since_us;
+    uint64_t last_resend_us;
+    unsigned short missing_seqnum;
+    int missing_pending;
 };
 
 raop_buffer_t *
@@ -203,9 +223,16 @@ raop_buffer_enqueue(raop_buffer_t *raop_buffer, unsigned char *data, unsigned sh
         return 0;
     }
 
+    if (entry->payload_data) {
+        free(entry->payload_data);
+        entry->payload_data = NULL;
+        entry->payload_size = 0;
+    }
+
     /* Update the raop_buffer entry header */
     entry->seqnum = seqnum;
     entry->rtp_timestamp = byteutils_get_int_be(data, 4);
+    entry->packet_arrival_time = monotonic_time_us();
     entry->filled = 1;
 
     entry->payload_data = malloc(payload_size);
@@ -238,19 +265,73 @@ raop_buffer_dequeue(raop_buffer_t *raop_buffer, unsigned int *length, uint32_t *
 
     /* Get the first buffer entry for inspection */
     raop_buffer_entry_t *entry = &raop_buffer->entries[raop_buffer->first_seqnum % RAOP_BUFFER_LENGTH];
-    if (no_resend) {
-        /* If we do no resends, always return the first entry */
-    } else if (!entry->filled) {
-        /* Check how much we have space left in the buffer */
-        if (entry_count < RAOP_BUFFER_LENGTH) {
-            /* Return nothing and hope resend gets on time */
+    if (entry->filled && seqnum_cmp(entry->seqnum, raop_buffer->first_seqnum) != 0) {
+        entry->filled = 0;
+        if (entry->payload_data) {
+            free(entry->payload_data);
+            entry->payload_data = NULL;
+            entry->payload_size = 0;
+        }
+    }
+
+    if (!entry->filled) {
+        const uint64_t now_us = monotonic_time_us();
+        if (!no_resend) {
+            if (!raop_buffer->missing_pending ||
+                raop_buffer->missing_seqnum != raop_buffer->first_seqnum) {
+                raop_buffer->missing_pending = 1;
+                raop_buffer->missing_seqnum = raop_buffer->first_seqnum;
+                raop_buffer->missing_since_us = now_us;
+                raop_buffer->last_resend_us = 0;
+            }
+
+            if (entry_count < RAOP_BUFFER_LENGTH &&
+                now_us - raop_buffer->missing_since_us < RAOP_RESEND_DEADLINE_US) {
+                return NULL;
+            }
+        }
+
+        /* A feed transition can jump over many sequence numbers. Once the
+         * first missing packet expires, skip the complete contiguous gap in
+         * one operation instead of waiting one resend deadline per number. */
+        short resume_offset = 1;
+        for (; resume_offset < entry_count; ++resume_offset) {
+            const unsigned short candidate_seqnum =
+                (unsigned short)(raop_buffer->first_seqnum + resume_offset);
+            raop_buffer_entry_t *candidate =
+                &raop_buffer->entries[candidate_seqnum % RAOP_BUFFER_LENGTH];
+            if (candidate->filled && candidate->seqnum == candidate_seqnum) {
+                entry = candidate;
+                break;
+            }
+        }
+
+        const unsigned short gap_start = raop_buffer->first_seqnum;
+        if (resume_offset >= entry_count) {
+            raop_buffer->missing_pending = 0;
             return NULL;
         }
-        /* Risk of buffer overrun, return empty buffer */
+
+        const unsigned short resume_seqnum =
+            (unsigned short)(gap_start + resume_offset);
+        const uint64_t wait_us = no_resend
+            ? 0
+            : now_us - raop_buffer->missing_since_us;
+        const uint64_t buffered_us = now_us >= entry->packet_arrival_time
+            ? now_us - entry->packet_arrival_time
+            : 0;
+        logger_log(raop_buffer->logger, LOGGER_WARNING,
+                   "RAOP audio gap %u-%u skipped after %llu ms; resuming at %u "
+                   "(buffered %llu ms)",
+                   gap_start, (unsigned short)(resume_seqnum - 1),
+                   (unsigned long long)(wait_us / 1000ULL), resume_seqnum,
+                   (unsigned long long)(buffered_us / 1000ULL));
+        raop_buffer->first_seqnum = resume_seqnum;
     }
 
     /* Update buffer and validate entry */
     raop_buffer->first_seqnum += 1;
+    raop_buffer->missing_pending = 0;
     if (!entry->filled) {
         return NULL;
     }
@@ -281,8 +362,20 @@ void raop_buffer_handle_resends(raop_buffer_t *raop_buffer, raop_resend_cb_t res
             }
 	    count++;
         }
-        if (count){
-            resend_cb(opaque, raop_buffer->first_seqnum, count);
+        if (count) {
+            const uint64_t now_us = monotonic_time_us();
+            if (!raop_buffer->missing_pending ||
+                raop_buffer->missing_seqnum != raop_buffer->first_seqnum) {
+                raop_buffer->missing_pending = 1;
+                raop_buffer->missing_seqnum = raop_buffer->first_seqnum;
+                raop_buffer->missing_since_us = now_us;
+                raop_buffer->last_resend_us = 0;
+            }
+            if (!raop_buffer->last_resend_us ||
+                now_us - raop_buffer->last_resend_us >= RAOP_RESEND_INTERVAL_US) {
+                resend_cb(opaque, raop_buffer->first_seqnum, count);
+                raop_buffer->last_resend_us = now_us;
+            }
         }
     }
 }
@@ -298,10 +391,14 @@ void raop_buffer_flush(raop_buffer_t *raop_buffer, int next_seq) {
         }
         raop_buffer->entries[i].filled = 0;
     }
+    raop_buffer->missing_pending = 0;
+    raop_buffer->missing_since_us = 0;
+    raop_buffer->last_resend_us = 0;
     if (next_seq < 0 || next_seq > 0xffff) {
         raop_buffer->is_empty = 1;
     } else {
-        raop_buffer->first_seqnum = next_seq;
-        raop_buffer->last_seqnum = next_seq - 1;
+        raop_buffer->first_seqnum = (unsigned short)next_seq;
+        raop_buffer->last_seqnum = (unsigned short)(next_seq - 1);
+        raop_buffer->is_empty = 0;
     }
 }

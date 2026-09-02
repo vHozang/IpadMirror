@@ -1,15 +1,22 @@
 #include "app/MainWindow.h"
 
+#include "app/DiagnosticsDialog.h"
+#include "app/SettingsDialog.h"
+
+#include <QAction>
 #include <QCloseEvent>
+#include <QEvent>
 #include <QFont>
 #include <QFrame>
 #include <QIcon>
 #include <QKeyEvent>
 #include <QLabel>
-#include <QMetaObject>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QShowEvent>
 #include <QStackedLayout>
+#include <QTimer>
+#include <QToolBar>
 #include <QVBoxLayout>
 
 namespace padmirror::app {
@@ -17,28 +24,24 @@ namespace {
 
 QString titleFor(airplay::ReceiverState state) {
     switch (state) {
-    case airplay::ReceiverState::Starting:
-        return QStringLiteral("STARTING");
-    case airplay::ReceiverState::Waiting:
-        return QStringLiteral("READY TO MIRROR");
-    case airplay::ReceiverState::Streaming:
-        return QStringLiteral("STREAMING");
-    case airplay::ReceiverState::Error:
-        return QStringLiteral("RECEIVER ERROR");
+    case airplay::ReceiverState::Starting: return QStringLiteral("STARTING");
+    case airplay::ReceiverState::Waiting: return QStringLiteral("READY TO MIRROR");
+    case airplay::ReceiverState::Connecting: return QStringLiteral("CONNECTING");
+    case airplay::ReceiverState::Streaming: return QStringLiteral("STREAMING");
+    case airplay::ReceiverState::Stopping: return QStringLiteral("RECEIVER STOPPED");
+    case airplay::ReceiverState::Error: return QStringLiteral("RECEIVER ERROR");
     }
     return {};
 }
 
 QString badgeFor(airplay::ReceiverState state) {
     switch (state) {
-    case airplay::ReceiverState::Starting:
-        return QStringLiteral("INITIALIZING");
-    case airplay::ReceiverState::Waiting:
-        return QStringLiteral("AIRPLAY");
-    case airplay::ReceiverState::Streaming:
-        return QStringLiteral("LIVE");
-    case airplay::ReceiverState::Error:
-        return QStringLiteral("ERROR");
+    case airplay::ReceiverState::Starting: return QStringLiteral("INITIALIZING");
+    case airplay::ReceiverState::Waiting: return QStringLiteral("AIRPLAY");
+    case airplay::ReceiverState::Connecting: return QStringLiteral("CONNECTING");
+    case airplay::ReceiverState::Streaming: return QStringLiteral("LIVE");
+    case airplay::ReceiverState::Stopping: return QStringLiteral("OFFLINE");
+    case airplay::ReceiverState::Error: return QStringLiteral("ERROR");
     }
     return {};
 }
@@ -46,17 +49,24 @@ QString badgeFor(airplay::ReceiverState state) {
 QString colorFor(airplay::ReceiverState state) {
     return state == airplay::ReceiverState::Error
         ? QStringLiteral("#ff695e")
-        : QStringLiteral("#b7f34a");
+        : state == airplay::ReceiverState::Stopping
+            ? QStringLiteral("#8c969a")
+            : QStringLiteral("#b7f34a");
 }
 
 } // namespace
 
-MainWindow::MainWindow(QWidget* parent)
-    : QWidget(parent) {
+MainWindow::MainWindow(ApplicationSettings* settings,
+                       AirPlayController* controller,
+                       QWidget* parent)
+    : QWidget(parent),
+      settings_(settings),
+      controller_(controller) {
     setWindowTitle(QStringLiteral("PadMirror"));
     setWindowIcon(QIcon(QStringLiteral(":/assets/icons/PadMirror-256.png")));
     setMinimumSize(640, 400);
     resize(1280, 800);
+    setMouseTracking(true);
     setStyleSheet(QStringLiteral("background: #050708;"));
 
     auto* stack = new QStackedLayout(this);
@@ -67,6 +77,8 @@ MainWindow::MainWindow(QWidget* parent)
     videoHost_->setAttribute(Qt::WA_NativeWindow);
     videoHost_->setAttribute(Qt::WA_OpaquePaintEvent);
     videoHost_->setAutoFillBackground(true);
+    videoHost_->setMouseTracking(true);
+    videoHost_->installEventFilter(this);
     auto palette = videoHost_->palette();
     palette.setColor(QPalette::Window, QColor(QStringLiteral("#000000")));
     videoHost_->setPalette(palette);
@@ -117,7 +129,7 @@ MainWindow::MainWindow(QWidget* parent)
     cardLayout->addWidget(stateDetail_);
 
     auto* instructions = new QLabel(
-        QStringLiteral("On iPad, open Control Center, choose Screen Mirroring, then select PadMirror."),
+        QStringLiteral("On iPad, open Control Center, choose Screen Mirroring, then select the PadMirror receiver."),
         card);
     instructions->setWordWrap(true);
     instructions->setStyleSheet(QStringLiteral(
@@ -133,51 +145,83 @@ MainWindow::MainWindow(QWidget* parent)
     panelLayout->addStretch(1);
     stack->addWidget(statePanel_);
 
-    receiver_ = std::make_unique<airplay::UxPlayReceiver>(
-        [this](airplay::ReceiverState state, const std::string& detail) {
-            const QString text = QString::fromUtf8(detail);
-            QMetaObject::invokeMethod(
-                this,
-                [this, state, text] { applyReceiverState(state, text); },
-                Qt::QueuedConnection);
-        });
+    toolbar_ = new QToolBar(this);
+    toolbar_->setMovable(false);
+    toolbar_->setIconSize(QSize(18, 18));
+    toolbar_->setStyleSheet(QStringLiteral(
+        "QToolBar { background: rgba(10, 14, 16, 220); border: 0; padding: 6px; }"
+        "QToolButton { color: #edf2eb; padding: 6px 10px; }"));
+    receiverAction_ = toolbar_->addAction(QStringLiteral("Stop Receiver"));
+    connect(receiverAction_, &QAction::triggered, this, [this] {
+        if (controller_->running()) {
+            controller_->stop();
+        } else {
+            controller_->start();
+        }
+    });
+    toolbar_->addSeparator();
+    auto* settingsAction = toolbar_->addAction(QStringLiteral("Settings"));
+    connect(settingsAction, &QAction::triggered, this, &MainWindow::showSettings);
+    auto* diagnosticsAction = toolbar_->addAction(QStringLiteral("Diagnostics"));
+    connect(diagnosticsAction, &QAction::triggered, this, &MainWindow::showDiagnostics);
+    auto* fullscreenAction = toolbar_->addAction(QStringLiteral("Fullscreen  F11"));
+    connect(fullscreenAction, &QAction::triggered, this, &MainWindow::toggleFullscreen);
+    stack->addWidget(toolbar_);
+    stack->setAlignment(toolbar_, Qt::AlignTop);
 
+    controlsHideTimer_ = new QTimer(this);
+    controlsHideTimer_->setSingleShot(true);
+    controlsHideTimer_->setInterval(2500);
+    connect(controlsHideTimer_, &QTimer::timeout, this, [this] {
+        if (controller_->state() == airplay::ReceiverState::Streaming) {
+            setControlsVisible(false);
+        }
+    });
+
+    connect(controller_, &AirPlayController::stateChanged,
+            this, &MainWindow::applyReceiverState);
     applyReceiverState(airplay::ReceiverState::Starting,
                        QStringLiteral("Preparing the in-process UxPlay receiver"));
 }
 
-MainWindow::~MainWindow() {
-    if (receiver_) {
-        receiver_->stop();
-    }
-}
+MainWindow::~MainWindow() = default;
 
 void MainWindow::startReceiver() {
-    if (receiverStartRequested_) {
-        return;
-    }
-    receiverStartRequested_ = true;
-
-    const auto handle = static_cast<std::uintptr_t>(videoHost_->winId());
-    const auto result = receiver_->start("PadMirror", handle);
-    if (!result.started) {
-        applyReceiverState(airplay::ReceiverState::Error,
-                           QString::fromUtf8(result.detail));
+    controller_->setVideoWindowHandle(
+        static_cast<std::uintptr_t>(videoHost_->winId()));
+    if (settings_->config().startReceiverOnLaunch) {
+        controller_->start();
+    } else {
+        applyReceiverState(airplay::ReceiverState::Stopping,
+                           QStringLiteral("Start the receiver from the toolbar when ready"));
     }
 }
 
 void MainWindow::showEvent(QShowEvent* event) {
     QWidget::showEvent(event);
-    if (receiver_) {
-        receiver_->setWindowHandle(static_cast<std::uintptr_t>(videoHost_->winId()));
-    }
+    controller_->setVideoWindowHandle(
+        static_cast<std::uintptr_t>(videoHost_->winId()));
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
-    if (receiver_) {
-        receiver_->stop();
-    }
+    controller_->stop();
     QWidget::closeEvent(event);
+}
+
+bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
+    if (watched == videoHost_) {
+        if (event->type() == QEvent::MouseButtonDblClick) {
+            toggleFullscreen();
+            return true;
+        }
+        if (event->type() == QEvent::Enter || event->type() == QEvent::MouseMove) {
+            setControlsVisible(true);
+            if (controller_->state() == airplay::ReceiverState::Streaming) {
+                controlsHideTimer_->start();
+            }
+        }
+    }
+    return QWidget::eventFilter(watched, event);
 }
 
 void MainWindow::keyPressEvent(QKeyEvent* event) {
@@ -194,6 +238,11 @@ void MainWindow::keyPressEvent(QKeyEvent* event) {
     QWidget::keyPressEvent(event);
 }
 
+void MainWindow::mouseDoubleClickEvent(QMouseEvent* event) {
+    toggleFullscreen();
+    event->accept();
+}
+
 void MainWindow::applyReceiverState(airplay::ReceiverState state,
                                     const QString& detail) {
     stateTitle_->setText(titleFor(state));
@@ -205,7 +254,33 @@ void MainWindow::applyReceiverState(airplay::ReceiverState state,
         "QLabel { color: #07090a; background: %1; border-radius: 4px; "
         "padding: 5px 9px; font-size: 10px; font-weight: 700; }").arg(color));
 
-    statePanel_->setVisible(state != airplay::ReceiverState::Streaming);
+    const bool streaming = state == airplay::ReceiverState::Streaming;
+    videoHost_->setVisible(streaming);
+    statePanel_->setVisible(!streaming);
+    if (streaming) {
+        setControlsVisible(true);
+        controlsHideTimer_->start();
+    } else {
+        controlsHideTimer_->stop();
+        setControlsVisible(true);
+    }
+    receiverAction_->setText(controller_->running()
+        ? QStringLiteral("Stop Receiver")
+        : QStringLiteral("Start Receiver"));
+    if (state == airplay::ReceiverState::Streaming &&
+        settings_->config().fullscreenOnConnect && !isFullScreen()) {
+        showFullScreen();
+    }
+}
+
+void MainWindow::showSettings() {
+    SettingsDialog dialog(settings_, this);
+    dialog.exec();
+}
+
+void MainWindow::showDiagnostics() {
+    DiagnosticsDialog dialog(controller_, this);
+    dialog.exec();
 }
 
 void MainWindow::toggleFullscreen() {
@@ -214,6 +289,10 @@ void MainWindow::toggleFullscreen() {
     } else {
         showFullScreen();
     }
+}
+
+void MainWindow::setControlsVisible(bool visible) {
+    toolbar_->setVisible(visible);
 }
 
 } // namespace padmirror::app

@@ -122,6 +122,7 @@ QStringList RuntimeDependencies::missingComponents() {
     requireFactory(missing, "D3D11 H.264 decoder", {"d3d11h264dec"});
     requireFactory(missing, "D3D11 H.265 decoder", {"d3d11h265dec"});
     requireFactory(missing, "D3D11 converter", {"d3d11convert"});
+    requireFactory(missing, "GStreamer video scaler", {"videoscale"});
     requireFactory(missing, "D3D11 video sink", {"d3d11videosink"});
     requireFactory(missing, "GStreamer audio converter", {"audioconvert"});
     requireFactory(missing, "GStreamer audio resampler", {"audioresample"});

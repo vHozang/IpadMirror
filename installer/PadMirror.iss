@@ -6,7 +6,9 @@
 #endif
 
 #define AppName "PadMirror"
-#define AppVersion "0.1.26"
+#ifndef AppVersion
+  #define AppVersion "1.0.0"
+#endif
 
 [Setup]
 AppId={{475CC31D-376B-4C26-A4C1-23DF219178EE}
@@ -33,32 +35,20 @@ RestartApplications=no
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
-Name: "desktopicon"; Description: "Tao bieu tuong tren Desktop"; GroupDescription: "Bieu tuong:"
+Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Shortcuts:"
+Name: "firewall"; Description: "Allow PadMirror through Windows Firewall (Private and Domain networks)"; GroupDescription: "AirPlay discovery:"; Flags: unchecked
 
 [Files]
 Source: "{#ReleaseDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-
-[InstallDelete]
-Type: files; Name: "{app}\libusb0.dll"
-Type: files; Name: "{app}\libusb-1.0.dll"
-Type: files; Name: "{app}\usb-bridge\_internal\libusb0.dll"
-Type: files; Name: "{app}\usb-bridge\_internal\libusb-1.0.dll"
-Type: files; Name: "{app}\wintun.dll"
-Type: files; Name: "{app}\usb-bridge\_internal\wintun.dll"
-Type: filesandordirs; Name: "{app}\usb-bridge\_internal\pytun_pmd3\wintun"
-Type: filesandordirs; Name: "{app}\dependencies\libusb-win32"
-Type: filesandordirs; Name: "{app}\dependencies\libusb"
-Type: filesandordirs; Name: "{app}\licenses\libusb-win32"
-Type: filesandordirs; Name: "{app}\licenses\UsbDk"
-Type: filesandordirs; Name: "{app}\usb-bridge"
 
 [Icons]
 Name: "{autoprograms}\PadMirror"; Filename: "{app}\PadMirror.exe"; IconFilename: "{app}\PadMirror.exe"; IconIndex: 0; AppUserModelID: "PadMirror.Desktop"
 Name: "{autodesktop}\PadMirror"; Filename: "{app}\PadMirror.exe"; IconFilename: "{app}\PadMirror.exe"; IconIndex: 0; AppUserModelID: "PadMirror.Desktop"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\dependencies\VC_redist.x64.exe"; Parameters: "/install /quiet /norestart"; StatusMsg: "Dang cai Microsoft Visual C++ Runtime..."; Flags: waituntilterminated skipifdoesntexist; Check: not VcRuntimeInstalled
-Filename: "{app}\PadMirror.exe"; Description: "Mo PadMirror"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\dependencies\VC_redist.x64.exe"; Parameters: "/install /quiet /norestart"; StatusMsg: "Installing Microsoft Visual C++ Runtime..."; Flags: waituntilterminated skipifdoesntexist; Check: not VcRuntimeInstalled
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\dependencies\configure-airplay-firewall.ps1"" -ExePath ""{app}\PadMirror.exe"""; Verb: "runas"; StatusMsg: "Requesting permission to configure Windows Firewall..."; Flags: shellexec waituntilterminated skipifsilent; Tasks: firewall
+Filename: "{app}\PadMirror.exe"; Description: "Open PadMirror"; Flags: nowait postinstall skipifsilent
 
 [Code]
 function VcRuntimeInstalled: Boolean;

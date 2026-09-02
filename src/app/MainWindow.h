@@ -1,16 +1,19 @@
 #pragma once
 
-#include "airplay/UxPlayReceiver.h"
+#include "app/AirPlayController.h"
+#include "app/ApplicationSettings.h"
 
 #include <QWidget>
 
-#include <memory>
-
-class QLabel;
-class QStackedWidget;
-class QKeyEvent;
+class QAction;
 class QCloseEvent;
+class QEvent;
+class QKeyEvent;
+class QLabel;
+class QMouseEvent;
 class QShowEvent;
+class QTimer;
+class QToolBar;
 
 namespace padmirror::app {
 
@@ -18,27 +21,37 @@ class MainWindow final : public QWidget {
     Q_OBJECT
 
 public:
-    explicit MainWindow(QWidget* parent = nullptr);
+    MainWindow(ApplicationSettings* settings,
+               AirPlayController* controller,
+               QWidget* parent = nullptr);
     ~MainWindow() override;
 
     void startReceiver();
 
 protected:
     void closeEvent(QCloseEvent* event) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;
+    void mouseDoubleClickEvent(QMouseEvent* event) override;
     void showEvent(QShowEvent* event) override;
 
 private:
     void applyReceiverState(airplay::ReceiverState state, const QString& detail);
+    void showSettings();
+    void showDiagnostics();
     void toggleFullscreen();
+    void setControlsVisible(bool visible);
 
+    ApplicationSettings* settings_ = nullptr;
+    AirPlayController* controller_ = nullptr;
     QWidget* videoHost_ = nullptr;
     QWidget* statePanel_ = nullptr;
     QLabel* stateBadge_ = nullptr;
     QLabel* stateTitle_ = nullptr;
     QLabel* stateDetail_ = nullptr;
-    std::unique_ptr<airplay::UxPlayReceiver> receiver_;
-    bool receiverStartRequested_ = false;
+    QToolBar* toolbar_ = nullptr;
+    QTimer* controlsHideTimer_ = nullptr;
+    QAction* receiverAction_ = nullptr;
 };
 
 } // namespace padmirror::app

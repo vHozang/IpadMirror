@@ -47,10 +47,24 @@ typedef enum videoflip_e {
 
 typedef struct video_renderer_s video_renderer_t;
 
+typedef struct video_renderer_stats_s {
+    double input_fps;
+    double sink_fps;
+    unsigned int queue_buffers;
+    uint64_t queue_dropped;
+    uint64_t qos_processed;
+    uint64_t qos_dropped;
+    uint64_t appsrc_failures;
+    double input_pts_delta_ms;
+    double sink_pts_delta_ms;
+    double sink_pts_lead_ms;
+    uint64_t generation;
+} video_renderer_stats_t;
+
 void video_renderer_init (logger_t *logger, const char *server_name, videoflip_t videoflip[2], const char *parser, const char *rtp_pipeline,
                           const char *decoder, const char *converter, const char *videosink, const char *videosink_options,
                           bool initial_fullscreen, bool video_sync, bool h265_support, bool coverart_support,
-                          guint playbin_version,  const char *uri);
+                          unsigned int playbin_version,  const char *uri);
 void video_renderer_set_window_handle(uintptr_t window_handle);
 void video_renderer_start ();
 void video_renderer_stop ();
@@ -67,7 +81,7 @@ bool video_renderer_eos_watch();
 uint64_t  video_renderer_render_buffer (unsigned char* data, int *data_len, int *nal_count, uint64_t *ntp_time);
 void video_renderer_display_jpeg(const void *data, int *data_len);
 void video_renderer_flush ();
-unsigned int video_renderer_listen(void *loop, int id);
+bool video_renderer_get_stats(video_renderer_stats_t *stats);
 void video_renderer_destroy ();
 void video_renderer_size(float *width_source, float *height_source, float *width, float *height);
 bool waiting_for_x11_window();

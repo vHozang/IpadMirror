@@ -2,7 +2,7 @@
 # receiver: mDNS discovery (UDP 5353) plus the RTSP/AirPlay TCP+UDP listeners.
 # Program-scoped so only PadMirror.exe is allowed, on Private+Domain profiles.
 param(
-    [string]$ExePath = "D:\App\PadMirror\PadMirror.exe"
+    [string]$ExePath = (Join-Path (Split-Path -Parent $PSScriptRoot) "PadMirror.exe")
 )
 $ErrorActionPreference = "Stop"
 
@@ -18,9 +18,10 @@ $rules = @(
     @{ Name = "PadMirror AirPlay (TCP In)";  Protocol = "TCP" }
 )
 
+Get-NetFirewallRule -DisplayName "*PadMirror*" -ErrorAction SilentlyContinue |
+    Remove-NetFirewallRule -ErrorAction SilentlyContinue
+
 foreach ($r in $rules) {
-    Get-NetFirewallRule -DisplayName $r.Name -ErrorAction SilentlyContinue |
-        Remove-NetFirewallRule -ErrorAction SilentlyContinue
     New-NetFirewallRule `
         -DisplayName $r.Name `
         -Direction Inbound `

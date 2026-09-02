@@ -1,168 +1,154 @@
-# Kiến trúc triển khai
+# Kiến trúc PadMirror
 
-PadMirror V1 chỉ hỗ trợ Windows 10/11 x64, chiều iPad -> PC. Mục tiêu: latency thấp,
-audio đến sớm và không tích lũy trễ. Hai transport loại trừ lẫn nhau (USB **hoặc**
-AirPlay), dùng chung một media stack; không second-display, remote-control, OBS,
-capture window, macOS hay Linux.
+PadMirror V1 là receiver **AirPlay-only cho Windows 10/11 x64**. Ứng dụng chỉ có một backend và một media path; không giữ abstraction đa-transport hoặc media pipeline cạnh tranh.
 
-## Module graph
+## Runtime graph
 
 ```text
-padmirror_core
-|- padmirror_media
-|- padmirror_usb
-|- padmirror_airplay
-`- padmirror_api
-
-padmirror_app -> tất cả module trên
+PadMirror.exe (Qt Widgets)
+  MainWindow / SettingsDialog / DiagnosticsDialog
+                       |
+                AirPlayController
+                       |
+                UxPlayReceiver
+                       |
+            padmirror_uxplay_native
+        RAOP/RTSP + pairing/crypto + mDNS
+             |                       |
+       video_renderer          audio_renderer
+             |                       |
+ H.264/H.265 → GStreamer       AAC-ELD/ALAC → PCM
+ → D3D11 decode/render         → GStreamer → WASAPI2
 ```
 
-Dependency một chiều: `padmirror_usb` và `padmirror_airplay` không include hoặc gọi
-lẫn nhau, và `padmirror_media` không biết transport cụ thể. Chỉ `padmirror_app`
-(và qua `MirrorCoordinator`) mới ghép các module lại.
+Các CMake target chính:
 
-- `padmirror_core`: domain model (`MirrorTransport`, `MirrorState`,
-  `DiscontinuityReason`), packet contract dùng chung, interface `IMediaIngress` /
-  `IMirrorBackend`, `MediaEpochController`, `MirrorCoordinator` và các lớp RAII cho
-  Windows handle, socket, GStreamer object, Bonjour registration, thread ownership.
-- `padmirror_media`: một `MediaEngine` duy nhất dùng chung cho cả hai transport.
-- `padmirror_usb`, `padmirror_airplay`: hai backend `IMirrorBackend` độc lập, cả hai
-  đang ở trạng thái gated (xem bên dưới).
-- `padmirror_api`: local API bind `127.0.0.1`.
+- `padmirror_support`: normalize `ReceiverConfig` và tạo receiver identity ổn định; không phụ thuộc Qt/GStreamer.
+- `padmirror_libplist`: libplist C được vendor cho Apple property lists.
+- `padmirror_uxplay_native`: UxPlay-derived RAOP/RTSP, crypto, mDNS và GStreamer renderers.
+- `padmirror_airplay`: biên C++ RAII `UxPlayReceiver` bao quanh native API.
+- `padmirror_app_support`: Qt Widgets UI, controller, settings, logging và runtime validation.
+- `padmirror_app`: `PadMirror.exe`.
+- `padmirror_runtime_check`: validator độc lập dùng cho release stage.
 
-## Packet contract dùng chung
+Không có USB/QuickTime backend, `MirrorCoordinator`, `IMirrorBackend`, `IMediaIngress`, loopback HTTP API, QML hoặc external receiver process.
 
-Cả USB và AirPlay đẩy media vào `MediaEngine` qua `IMediaIngress`, dùng chung hai
-struct đóng gói:
+## Lifecycle receiver
 
-- `EncodedVideoPacket`: codec, payload, `ptsNs`, `epoch`, `keyframe`,
-  `discontinuity`, `format`.
-- `EncodedAudioPacket`: codec, payload, `ptsNs`, `epoch`, `discontinuity`, `format`.
+`AirPlayController` sở hữu đúng một `UxPlayReceiver` và là adapter giữa Qt UI thread với native callback threads.
 
-Backend chỉ tạo packet và gọi `pushVideo` / `pushAudio` / `signalDiscontinuity` /
-`endOfStream`; media không cần biết dữ liệu đến từ USB hay AirPlay.
+Start:
 
-## MirrorCoordinator
+1. Normalize receiver name, max FPS và audio settings.
+2. Tạo stable locally-administered unicast MAC từ receiver identity.
+3. Khởi tạo GStreamer video/audio renderer với HWND hiện tại.
+4. Tạo RAOP receiver và đầy đủ callback mặc định.
+5. Bind RTSP/RAOP listener.
+6. Chỉ sau khi listener hoạt động mới publish `_raop._tcp` và `_airplay._tcp` qua mDNS.
+7. Chuyển state sang `Waiting`/Ready.
 
-`MirrorCoordinator` là owner duy nhất của session:
+Stop theo thứ tự ngược: dừng quảng bá, hủy RAOP/DNS-SD, rồi hủy renderer/logger. Start/stop/restart được serialize; thay receiver name hoặc giới hạn FPS gây restart có kiểm soát, còn volume/mute được áp dụng trực tiếp.
+
+## State model
+
+Native receiver phát các state:
+
+- `Starting`: chuẩn bị runtime/listener.
+- `Waiting`: receiver đã listen và sẵn sàng được chọn trên iPad; UI hiển thị **Ready**.
+- `Connecting`: một AirPlay client đang thiết lập phiên.
+- `Streaming`: media đang được nhận/render.
+- `Stopping`: receiver đã hoặc đang dừng; UI hiển thị **Stopped**.
+- `Error`: lỗi runtime, bind, mDNS hoặc renderer.
+
+Callback native không thao tác widget trực tiếp. `AirPlayController` dùng queued invocation để marshal state và diagnostics về Qt event loop. Các giá trị volume/mute được chia sẻ với callback threads bằng atomic.
+
+## Video path
+
+AirPlay cung cấp H.264 hoặc H.265 access units. Pipeline native dùng:
 
 ```text
-AppController
-    |
-MirrorCoordinator
-    |- UsbMirrorBackend
-    |- AirPlayBackend
-    `- MediaEngine
+appsrc
+  → h264parse/h265parse
+      config-interval=-1
+      disable-passthrough=true
+  → d3d11h264dec/d3d11h265dec
+  → d3d11convert
+  → queue max-size-buffers=3 leaky=downstream
+  → videoscale
+  → d3d11videosink
 ```
 
-Trách nhiệm: bảo đảm USB XOR AirPlay, start/stop/switch transport, flush media trước
-mỗi lần chuyển mode, map backend state thành UI/API state, xử lý reconnect và error
-policy. Backend không gọi trực tiếp UI; chuyển AirPlay <-> USB là thao tác explicit
-của người dùng và không tự ngắt session đang chạy.
+Nguyên tắc quan trọng:
 
-## Epoch và discontinuity
+- Không đặt leaky queue trước parser/decoder: bỏ access unit mã hóa có thể phá prediction chain.
+- Queue tối đa ba buffer chỉ nằm sau decode/conversion, vì vậy chỉ frame đã decode cũ bị bỏ để về live edge.
+- Renderer nhận HWND của Qt `WA_NativeWindow` qua `gst_video_overlay_set_window_handle`.
+- Sink giữ aspect ratio khi resize/fullscreen.
+- `d3d11convert` xử lý memory/caps và color-range trước sink.
+- Annex-B NAL inspection đánh dấu H.264 IDR (type 5) và H.265 BLA/IDR/CRA (types 16–21); access unit khác mang `DELTA_UNIT`.
+- Buffer đầu sau start/flush mang `DISCONT`; flush reset pipeline timing/discontinuity.
+- Property decoder low-latency chỉ được set khi runtime factory thực sự expose property đó. Điều này tránh parse/start failure giữa các bản GStreamer/driver.
 
-`MediaEpochController` quản lý tính liên tục của stream. Khi phát hiện gián đoạn nó
-tăng epoch, flush ngay video/audio queue, reset A/V anchor, ghi lại `reason` cùng
-timestamp flush và media đầu tiên sau flush, rồi từ chối mọi packet có
-`epoch < activeEpoch`.
+PadMirror yêu cầu D3D11 H.264 và H.265 decoder trong runtime check; không quảng bá software fallback như một đường được hỗ trợ.
 
-Ngưỡng và nguyên nhân chính:
+## Audio path
 
-- PTS lùi quá 1 ms -> `TimestampReset`.
-- PTS nhảy tiến quá 250 ms -> `UserSeekLikeJump`.
-- Đổi format video/audio -> `VideoFormatChanged` / `AudioFormatChanged`.
-- Chuyển transport -> `TransportSwitch`; reconnect -> `TransportReconnect`.
-- A/V lệch quá 50 ms kéo dài -> hard resync (flush và re-anchor ngay, không sửa dần
-  trong hàng trăm mili-giây).
+AirPlay Screen Mirroring thường gửi AAC-ELD (AOT-39). `avdec_aac` không phải decoder phù hợp cho format này, nên renderer load động `libfdk-aac-2.dll` và decode AAC-ELD in-process. ALAC sử dụng GStreamer `avdec_alac`.
 
-## Media stack
-
-`MediaEngine` = GStreamer + D3D11 hardware decode/render + WASAPI.
+PCM đi qua:
 
 ```text
-MediaIngress
-|- MediaEpochController
-|- TimestampNormalizer
-|- VideoPipeline (FrameQueue -> parser -> D3D11 decoder -> D3D11 renderer)
-`- AudioPipeline (AudioLiveBuffer -> decoder -> resampler -> WasapiOutput)
+appsrc
+  → queue max-size-time=200 ms leaky=no
+  → audioconvert
+  → audioresample quality=10
+  → volume
+  → level
+  → wasapi2sink
+      low-latency=false
+      buffer-time=90 ms
+      latency-time=20 ms
+      sync=true
 ```
 
-- Canvas ra `1920x1080`, giữ aspect ratio, letterbox/pillarbox.
-- Video queue mục tiêu 0-1 frame, tối đa 3 frame, `leaky=downstream` để luôn render
-  frame mới nhất; GPU path không copy frame về CPU khi D3D11 decoder khả dụng.
-- Hardware decoder là đường chính; software decoder chỉ là fallback có cảnh báo
-  diagnostics.
-- Audio 48 kHz, target USB khoảng 8 ms, AirPlay 10-20 ms, hard max 35 ms; queue đầy
-  thì bỏ media cũ (drop oldest) để về live edge.
-- Không interpolation, không fake 60 FPS; chỉ báo 59-60 FPS khi source thật sự cung
-  cấp 60 FPS.
+Timestamp NTP từ client được re-anchor sang clock cục bộ. Burst governor dựa trên `g_get_monotonic_time()` và bỏ input khi lượng audio đã push vượt wall-clock hơn 150 ms, tránh tích lũy burst mà không phụ thuộc WASAPI sink clock. Flush reset GStreamer, decoder AAC-ELD, wall-clock accounting và discontinuity state.
 
-## USB Gaming (gated)
+## UI và settings
 
-USB dùng kênh AV user-mode do Apple runtime cung cấp, **không** cài/thay/rebind/filter
-driver Apple: không rebind `MI_02` sang WinUSB, không libusb, UsbDk, Zadig, không
-Python bridge, không Developer Mode/Developer Disk Image/DisplayService.
+UI dùng Qt Widgets:
 
-```text
-UsbMirrorBackend
-|- AppleRuntimeProbe
-|- AppleDeviceRegistry (SetupAPI + libimobiledevice/libusbmuxd)
-|- PairingState (Lockdown/Trust)
-|- AppleAvChannelFactory
-|  |- AppleMuxServiceChannel
-|  `- AppleDeviceInterfaceChannel
-|- QuickTimeProtocol + PacketParser
-`- UsbDiagnostics
-```
+- `MainWindow` tạo native video host, status card và toolbar.
+- F11/double-click chuyển fullscreen; Escape thoát fullscreen.
+- `SettingsDialog` lưu receiver name, 30/60 FPS, volume/mute, keep-awake, start-on-launch và fullscreen-on-connect.
+- `DiagnosticsDialog` hiển thị listener, connection/client, codec/resolution/sample rate, backend/runtime và log path.
+- `QSettings` lưu cấu hình theo application identity `PadMirror`.
+- Khi streaming, controller có thể gọi `SetThreadExecutionState` để giữ display thức theo setting.
 
-Backend chỉ qua gate khi mở được AV channel bằng Apple stack hiện hữu. Nếu chỉ có
-thể lấy `MI_02` bằng cách thay driver thì backend trả `USB_CAPTURE_UNSUPPORTED` và
-dừng sạch, không có fallback nguy hiểm. `QuickTimeProtocol`/`PacketParser` hiện có
-được tái sử dụng nhưng chuyển output sang packet contract mới và thêm phát hiện
-format/PTS discontinuity.
+## Runtime validation và logs
 
-## AirPlay Wi-Fi (gated, chưa triển khai)
+`RuntimeDependencies` cấu hình plugin path/registry riêng cho package rồi kiểm tra:
 
-AirPlay sẽ được **port vào chính `PadMirror.exe`** từ mã UxPlay (GPLv3-or-later);
-**không** chạy `uxplay.exe` ngoài tiến trình, không RTP loopback relay, không
-`QProcess`/`LanReceiver`/`LanPipeline`.
+- `appsrc`, `queue`, H.264/H.265 parsers.
+- D3D11 H.264/H.265 decoders, converter và sink.
+- audio convert/resample, volume, level, ALAC decoder và WASAPI2 sink.
+- `libfdk-aac-2.dll`.
 
-```text
-AirPlayBackend
-|- BonjourPublisher (_airplay._tcp + _raop._tcp, tên mặc định PadMirror-PC)
-|- AirPlaySession / AirPlayControlProtocol / AirPlayPairing+Crypto
-|- AirPlayVideoReceiver + AirPlayAudioReceiver
-`- AirPlayDiagnostics
-```
+`PadMirrorRuntimeCheck.exe` và `PadMirror.exe --check-runtime` dùng cùng validator. Native stderr được redirect vào `gstreamer.log`; Qt/application messages đi vào `padmirror.log`. Mỗi log rotate ở 4 MiB và giữ một bản `.1`.
 
-Protocol AirPlay native **chưa được triển khai**; transport này ở trạng thái gated
-cho tới M6/M7 và báo `Unavailable` khi runtime (Bonjour/mDNSResponder, OpenSSL,
-libplist) hoặc port UxPlay chưa sẵn sàng. Callback UxPlay khi hoàn thiện sẽ chuyển
-thành `EncodedVideoPacket`/`EncodedAudioPacket` và đi qua cùng `MediaEngine`. Vì port
-UxPlay GPLv3 vào binary chính, license sản phẩm là GPLv3-or-later kèm source tương ứng.
+## Network và security boundary
 
-Khi USB đang streaming, AirPlay connection bị từ chối với trạng thái `BUSY`; cắm USB
-trong lúc AirPlay chạy chỉ hiển thị `USB AVAILABLE`, không tự ngắt AirPlay.
+Receiver listen trên LAN để AirPlay hoạt động; không có HTTP automation API. mDNS được bundle cùng native backend, không cần Bonjour SDK/service bên ngoài.
 
-## Local API
+Firewall helper:
 
-`padmirror_api` bind `127.0.0.1:17890`, không bind LAN; giới hạn body/header/timeout/
-số client/kích thước JSON và từ chối request ngoài loopback. QML vẫn gọi trực tiếp
-`AppController` properties/signals; API chỉ là kênh automation/diagnostics bổ sung.
+- Chỉ tạo inbound rules gắn với đường dẫn tuyệt đối của `PadMirror.exe`.
+- Chỉ áp dụng Private và Domain profiles.
+- Tạo rule TCP và UDP cho in-process receiver/mDNS.
+- Không chạy trong build, runtime hoặc portable package nếu người dùng không gọi rõ ràng.
+- Installer task bỏ chọn mặc định và cần UAC khi được chọn.
 
-## Thread model
+## Licensing và phạm vi
 
-- Qt/QML chỉ chạy trên UI thread.
-- USB capability probe, Apple device enumeration và QuickTime protocol chạy trên
-  worker của `UsbMirrorBackend`.
-- Decode/render/audio scheduling do GStreamer quản lý.
-- Device scan chạy nền; cập nhật UI được đưa về Qt event loop.
-- Metrics dùng counter nhỏ, thread-safe, refresh UI mỗi 250 ms.
+`PadMirror.exe` liên kết mã UxPlay-derived GPLv3, vì vậy sản phẩm được phân phối theo GPL-3.0-or-later và phải đi kèm/cho truy cập Corresponding Source phù hợp cùng notices. Xem `LICENSES/THIRD_PARTY.md`.
 
-## Phạm vi V1
-
-Không recording, screenshot, filter, HDR, tăng chi tiết bằng AI, remote control,
-multi-device hay 120 FPS. Không OBS, không capture window, không second display.
-AirPlay là fallback và hiện chưa hoạt động; USB là đường chính nhưng chỉ chạy khi
-Apple runtime mở được kênh AV an toàn.
+V1 không có USB capture, OBS, recording, screenshot, filter/HDR, remote control, second display, multi-device hay 120 FPS.

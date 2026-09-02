@@ -1,70 +1,71 @@
 # PadMirror
 
-PadMirror là ứng dụng mirror màn hình iPad sang PC, tối ưu cho chơi game độ trễ thấp. V1 chỉ hỗ trợ **Windows 10/11 x64**. Đường truyền chính là **AirPlay không dây**; USB chỉ khả dụng nếu Apple cung cấp kênh AV an toàn (thực tế trên Windows là không, nên USB báo unsupported một cách trung thực).
+PadMirror là ứng dụng nhận **AirPlay Screen Mirroring từ iPad trên Windows 10/11 x64**, tối ưu cho hình ảnh và âm thanh trực tiếp có độ trễ thấp.
 
-- **USB (Apple user-mode AV channel)**: chỉ hoạt động khi hệ thống Apple cung cấp một kênh AV ở user-mode được hỗ trợ. PadMirror **không bao giờ** cài, thay thế, rebind hay filter driver USB của Apple. Apple không cung cấp kênh AV như vậy trên Windows, nên USB báo `USB_CAPTURE_UNSUPPORTED` và dừng sạch.
-- **AirPlay (in-process, GPLv3)**: receiver AirPlay chạy ngay trong `PadMirror.exe` bằng mã có nguồn gốc UxPlay được vendor vào `third_party/uxplay-native/`. Không chạy `uxplay.exe` ngoài tiến trình, không relay RTP qua loopback. Receiver bind listener RTSP/RAOP rồi mới publish record `_airplay._tcp`/`_raop._tcp`, nên iPad thấy PadMirror trong danh sách Screen Mirroring và kết nối trực tiếp. **Vì link mã GPLv3, license phân phối của PadMirror là GPL-3.0-or-later.**
-
-> Kết nối AirPlay yêu cầu người dùng chọn PadMirror trong Control Center → Screen Mirroring trên iPad (đây là hành vi bắt buộc của giao thức AirPlay). PadMirror không thể tự khởi tạo phiên thay cho iPad.
-
-Media stack chung: GStreamer + D3D11 hardware decode/render + WASAPI. Cả hai transport đẩy gói mã hoá vào một `MediaEngine` chung qua contract `IMediaIngress`; media không biết chi tiết transport.
-
-Không có recording, screenshot, filter, HDR, remote control, multi-device, second display, OBS integration, cầu Python USB hay mục tiêu 120 FPS trong V1.
-
-## Kiến trúc
+PadMirror chỉ có **một đường runtime**:
 
 ```text
-padmirror_core   (types, IMediaIngress, IMirrorBackend, MediaEngine, MirrorCoordinator)
-|- padmirror_media   (VideoPipeline / AudioPipeline / MediaSession)
-|- padmirror_usb     (AppleRuntimeProbe, AppleAvChannelFactory, UsbMirrorBackend)
-|- padmirror_airplay (AirPlayBackend, BonjourPublisher)
-`- padmirror_api     (loopback automation API)
-
-padmirror_app -> tất cả module trên
+iPad
+  → AirPlay / RAOP trong mạng LAN
+  → UxPlay native chạy trong PadMirror.exe
+  → GStreamer
+      • H.264/H.265 → D3D11 hardware decode/render
+      • AAC-ELD/ALAC → libfdk-aac/GStreamer → WASAPI2
+  → Qt Widgets UI
 ```
 
-`MirrorCoordinator` là owner duy nhất của session: bảo đảm USB XOR AirPlay, arm media pipeline trước khi backend chạy, flush khi chuyển mode, và map trạng thái backend sang UI/API. Chuyển USB ↔ AirPlay là thao tác explicit của người dùng.
+- Receiver UxPlay được biên dịch trực tiếp vào `PadMirror.exe`.
+- Không chạy `uxplay.exe`, không RTP relay qua localhost và không cần OBS.
+- Không có USB/QuickTime capture, driver/filter USB, Python bridge hoặc API HTTP cục bộ.
+- UI dùng Qt Widgets; video được render vào HWND native của widget bằng `d3d11videosink`.
+- PadMirror được phân phối theo **GPL-3.0-or-later** vì liên kết mã có nguồn gốc UxPlay GPLv3.
 
-## Build Windows 10/11 x64
+> AirPlay yêu cầu người dùng chọn receiver trên iPad. PadMirror không thể tự khởi tạo phiên Screen Mirroring thay cho iPad.
 
-Cần Windows 10/11 x64, PowerShell và kết nối Internet. Script tự provision MSVC portable, Qt, CMake/Ninja, GStreamer và Inno Setup.
+## Yêu cầu runtime
+
+- Windows 10 hoặc Windows 11, x64.
+- GPU/driver hỗ trợ GStreamer D3D11 H.264 và H.265 decoder.
+- iPad và PC trong cùng LAN/VLAN, không bật AP/client isolation.
+- Windows network profile nên là `Private`.
+- Firewall cho phép `PadMirror.exe` nhận lưu lượng trên mạng Private/Domain.
+
+Bản installer và portable đều tự chứa Qt, GStreamer/plugin cần thiết, MSVC runtime và `libfdk-aac-2.dll`. Ứng dụng kiểm tra runtime trước khi mở receiver; package không tải hoặc sửa runtime khi đang chạy.
+
+## Chạy AirPlay
+
+1. Mở PadMirror. Receiver mặc định tự chuyển từ **Starting** sang **Ready**.
+2. Trên iPad, mở **Control Center → Screen Mirroring**.
+3. Chọn tên receiver, mặc định là **PadMirror**.
+4. Dùng **F11** hoặc double-click vùng video để bật/tắt fullscreen; nhấn **Escape** để thoát fullscreen.
+
+Settings cho phép đổi tên receiver, quảng bá tối đa 30/60 FPS, volume/mute, keep-awake khi streaming, tự khởi động receiver và fullscreen khi kết nối. Những thay đổi ảnh hưởng quảng bá receiver được áp dụng bằng một lần restart có kiểm soát.
+
+Nếu iPad không thấy receiver, xem [hướng dẫn mạng và firewall](docs/wifi.md). Firewall helper được đóng gói nhưng **không tự chạy** trong bản portable; trong installer đây là task bỏ chọn mặc định và chỉ chạy sau khi người dùng chọn rồi chấp nhận UAC. Rule chỉ áp dụng cho `PadMirror.exe` trên Private/Domain.
+
+## Build Windows
+
+Từ PowerShell ở thư mục repository:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1
 ```
 
-Kết quả:
+Script provision toolchain khi cần, configure/build bằng MSVC, chạy tests, kiểm tra staged runtime, scan payload bị cấm và tạo:
 
 ```text
 build\windows-x64\stage\PadMirror.exe
+build\windows-x64\stage\PadMirrorRuntimeCheck.exe
 dist\PadMirror-portable.zip
 dist\PadMirrorSetup.exe
+dist\SHA256SUMS.txt
 ```
 
-Bản release kèm Qt, GStreamer (chỉ các plugin decode/render/WASAPI cần thiết), MSVC runtime và license. Khi khởi động, PadMirror kiểm tra component bắt buộc; nếu runtime media thiếu/hỏng, có thể chạy `dependencies\repair-runtime.ps1` để tải lại GStreamer chính thức và kiểm tra SHA-256. Installer chạy ở quyền người dùng, chỉ cài Microsoft VC++ runtime khi thiếu; **không** đụng tới driver, service, filter hay firewall.
+Chi tiết dependency, build thủ công và runtime checker: [docs/build.md](docs/build.md).
 
-Chi tiết: [docs/build.md](docs/build.md) và [docs/usb-setup.md](docs/usb-setup.md).
+## Tests portable
 
-## Chạy USB
-
-1. Kết nối iPad bằng cáp có truyền dữ liệu.
-2. Mở khoá iPad và chọn **Trust This Computer** nếu được hỏi.
-3. Mở PadMirror, chọn `USB Gaming`. Khi một kênh AV user-mode của Apple khả dụng, PadMirror bắt đầu capture tự động; nếu không, ứng dụng hiển thị trạng thái `USB_CAPTURE_UNSUPPORTED` và gợi ý chuyển sang AirPlay (không tự chuyển).
-4. Không cần Screen Mirroring, không cần cùng Wi-Fi, không cần Developer Mode.
-
-PadMirror không cài UsbDk, Zadig hay `libusb`/`libusb0` cho iPad, và không thay/rebind/filter driver Apple trong bất kỳ trường hợp nào.
-
-## Chạy AirPlay (khi khả dụng)
-
-1. Đặt iPad và PC trong cùng mạng Wi-Fi, tắt AP/client isolation.
-2. Trong Settings, chọn `AirPlay Wi-Fi`. Khi receiver in-process và Bonjour runtime sẵn sàng, PadMirror quảng bá `PadMirror-PC`.
-3. Trên iPad: Control Center -> Screen Mirroring -> `PadMirror-PC`.
-
-Receiver AirPlay native đã được tích hợp in-process (mã UxPlay vendored). Khi bật AirPlay, PadMirror bind listener rồi publish `_airplay._tcp`/`_raop._tcp`; nếu bind/đăng ký thất bại, backend báo lỗi trung thực thay vì quảng bá dịch vụ chết. Chi tiết: [docs/wifi.md](docs/wifi.md).
-
-## Kiểm tra
-
-Core tests (portable, không cần Qt/GStreamer):
+Hai test cấu hình/identity không phụ thuộc Qt hoặc GStreamer:
 
 ```bash
 cmake -S . -B build/core -DPADMIRROR_BUILD_APP=OFF -DPADMIRROR_BUILD_TESTS=ON
@@ -72,6 +73,25 @@ cmake --build build/core
 ctest --test-dir build/core --output-on-failure
 ```
 
-Core tests bao phủ packet parser, protocol replies, audio ring buffer, live-edge policy, media epoch/engine và `MirrorCoordinator` (USB XOR AirPlay, thứ tự arm/start, rollback khi lỗi). Tương thích iPad/iPadOS thực tế, latency, và phiên game dài phải xác nhận trên phần cứng đích sau khi M2/M6/M7 có triển khai thật.
+Tests này kiểm tra normalize receiver settings và receiver identity/MAC ổn định; chúng không thay thế kiểm thử iPad end-to-end.
 
-Tài liệu kỹ thuật: [kiến trúc](docs/architecture.md), [USB protocol](docs/usb-protocol-notes.md), [đo latency](docs/latency-testing.md).
+## Diagnostics và logs
+
+**Diagnostics** hiển thị state, receiver/listener, client, codec/resolution, sample rate, GStreamer version và thư mục log.
+
+Logs được rotate ở 4 MiB, giữ một bản `.1`, tại thư mục App Local Data của PadMirror:
+
+- `padmirror.log`: log Qt/application.
+- `gstreamer.log`: stderr của UxPlay/GStreamer native.
+
+## Phạm vi V1
+
+V1 không có recording, screenshot, filter, HDR, remote control, second display, multi-device, OBS integration hoặc mục tiêu 120 FPS. Mức 30/60 FPS là khả năng quảng bá; FPS thực tế do iPad, nội dung, mạng, decoder và display quyết định.
+
+## Tài liệu
+
+- [Kiến trúc](docs/architecture.md)
+- [Build và packaging](docs/build.md)
+- [Wi-Fi, discovery và firewall](docs/wifi.md)
+- [Đo latency và độ ổn định](docs/latency-testing.md)
+- [Third-party notices](LICENSES/THIRD_PARTY.md)

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "support/ReceiverConfig.h"
+
 #include <atomic>
 #include <cstdint>
 #include <functional>
@@ -9,16 +11,56 @@
 
 namespace padmirror::airplay {
 
+struct ReceiverContext;
+
 enum class ReceiverState {
     Starting,
     Waiting,
+    Connecting,
     Streaming,
+    Stopping,
     Error,
+};
+
+struct ReceiverDiagnostics {
+    ReceiverState state = ReceiverState::Starting;
+    std::string detail;
+    std::string receiverName;
+    std::uint16_t port = 0;
+    int connectionCount = 0;
+    std::string clientName;
+    std::string clientModel;
+    std::string videoCodec;
+    int videoWidth = 0;
+    int videoHeight = 0;
+    double videoInputFps = 0.0;
+    double videoSinkFps = 0.0;
+    std::uint32_t videoQueueBuffers = 0;
+    std::uint64_t videoQueueDropped = 0;
+    std::uint64_t videoQosDropped = 0;
+    std::uint64_t videoAppsrcFailures = 0;
+    double videoInputPtsDeltaMs = 0.0;
+    double videoSinkPtsDeltaMs = 0.0;
+    double videoSinkPtsLeadMs = 0.0;
+    std::string audioCodec;
+    int audioSampleRate = 0;
+    std::uint64_t audioAppsrcQueuedNs = 0;
+    std::uint64_t audioQueueQueuedNs = 0;
+    std::int64_t audioPtsLeadNs = 0;
+    std::uint64_t audioAppsrcDropped = 0;
+    std::uint64_t audioQueueDropped = 0;
+    std::uint64_t audioAppsrcFailures = 0;
+    std::uint64_t audioReanchors = 0;
+    std::uint64_t audioConcealedFrames = 0;
+    std::uint64_t audioDecoderResets = 0;
+    std::uint64_t audioLatencyRecoveries = 0;
+    int maxFps = 60;
 };
 
 class UxPlayReceiver final {
 public:
     using StateCallback = std::function<void(ReceiverState, const std::string&)>;
+    using DiagnosticsCallback = std::function<void(const ReceiverDiagnostics&)>;
 
     struct StartResult {
         bool started = false;
@@ -26,25 +68,27 @@ public:
         std::uint16_t port = 0;
     };
 
-    explicit UxPlayReceiver(StateCallback stateCallback);
+    UxPlayReceiver(StateCallback stateCallback,
+                   DiagnosticsCallback diagnosticsCallback = {});
     ~UxPlayReceiver();
 
     UxPlayReceiver(const UxPlayReceiver&) = delete;
     UxPlayReceiver& operator=(const UxPlayReceiver&) = delete;
 
-    StartResult start(const std::string& receiverName, std::uintptr_t windowHandle);
+    StartResult start(const support::ReceiverConfig& config,
+                      std::uintptr_t windowHandle);
     void setWindowHandle(std::uintptr_t windowHandle);
+    void setAudioOutput(int volumePercent, bool muted);
     void stop();
 
     [[nodiscard]] bool running() const;
 
 private:
-    struct Context;
-
     void releaseLocked();
 
     StateCallback stateCallback_;
-    std::shared_ptr<Context> context_;
+    DiagnosticsCallback diagnosticsCallback_;
+    std::shared_ptr<ReceiverContext> context_;
     mutable std::mutex mutex_;
     void* raop_ = nullptr;
     void* dnssd_ = nullptr;

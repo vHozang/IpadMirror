@@ -1,3 +1,6 @@
+#include "app/AirPlayController.h"
+#include "app/ApplicationSettings.h"
+#include "app/Logging.h"
 #include "app/MainWindow.h"
 #include "app/RuntimeDependencies.h"
 
@@ -13,6 +16,10 @@
 #include <shobjidl_core.h>
 #endif
 
+#ifndef PADMIRROR_VERSION
+#define PADMIRROR_VERSION "1.0.0"
+#endif
+
 int main(int argc, char* argv[]) {
 #ifdef Q_OS_WIN
     SetCurrentProcessExplicitAppUserModelID(L"PadMirror.Desktop");
@@ -20,9 +27,11 @@ int main(int argc, char* argv[]) {
 
     QApplication application(argc, argv);
     QCoreApplication::setOrganizationName(QStringLiteral("PadMirror"));
+    QCoreApplication::setOrganizationDomain(QStringLiteral("padmirror.local"));
     QCoreApplication::setApplicationName(QStringLiteral("PadMirror"));
-    QCoreApplication::setApplicationVersion(QStringLiteral("1.0.0"));
+    QCoreApplication::setApplicationVersion(QStringLiteral(PADMIRROR_VERSION));
     application.setWindowIcon(QIcon(QStringLiteral(":/assets/icons/PadMirror-256.png")));
+    padmirror::app::installLogging();
 
     padmirror::app::RuntimeDependencies::configureEnvironment();
     const auto arguments = QCoreApplication::arguments();
@@ -57,7 +66,9 @@ int main(int argc, char* argv[]) {
         return 2;
     }
 
-    padmirror::app::MainWindow window;
+    padmirror::app::ApplicationSettings settings;
+    padmirror::app::AirPlayController controller(&settings);
+    padmirror::app::MainWindow window(&settings, &controller);
     window.show();
     QTimer::singleShot(0, &window, &padmirror::app::MainWindow::startReceiver);
     return application.exec();

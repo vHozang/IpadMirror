@@ -1,36 +1,92 @@
-# Mirror khi cùng Wi-Fi
+# AirPlay trên Wi-Fi/LAN
 
-Wi-Fi dùng AirPlay và là đường dự phòng của USB. USB vẫn là lựa chọn cho PUBG vì ít jitter và ít tích lũy latency hơn.
+PadMirror là receiver AirPlay-only. iPad kết nối trực tiếp tới receiver UxPlay native chạy trong `PadMirror.exe`; không có `uxplay.exe`, localhost RTP relay hoặc Bonjour service bên ngoài.
 
-## Trạng thái hiện tại
+## Điều kiện mạng
 
-AirPlay Wi-Fi hiện **chưa khả dụng**. Receiver AirPlay được port trực tiếp vào `PadMirror.exe` (cùng process, dựa trên mã UxPlay GPLv3), không chạy tiến trình `uxplay.exe` ngoài và không dùng RTP relay qua loopback. Phần native này được lên lịch cho các mốc M6/M7 và chưa hoàn thiện, nên PadMirror báo AirPlay ở trạng thái `Unavailable` cho tới khi receiver native được vendored vào binary.
-
-Tới thời điểm đó, hãy dùng USB Gaming (`docs/usb-setup.md`).
-
-## Yêu cầu mạng (khi AirPlay khả dụng)
-
-- iPad và máy tính ở cùng LAN/VLAN.
-- Tắt `AP isolation`, `client isolation` hoặc guest-network isolation.
+- iPad và PC ở cùng LAN/VLAN.
+- Không dùng guest Wi-Fi có isolation.
+- Tắt `AP isolation`, `client isolation` hoặc policy chặn peer-to-peer LAN.
 - Windows network profile nên là `Private`.
-- Hai thiết bị không ở guest Wi-Fi.
+- VPN, Hyper-V/WSL virtual adapter hoặc nhiều NIC có thể làm mDNS chọn sai interface; tạm tắt adapter không dùng khi chẩn đoán.
+- Multicast DNS UDP 5353 và AirPlay listener traffic tới `PadMirror.exe` không bị firewall chặn.
 
-Receiver dùng bộ port AirPlay cố định tương thích UxPlay và Bonjour/mDNS in-process; không có RTP relay nội bộ và không mở cổng relay ra LAN.
+PadMirror publish `_raop._tcp` và `_airplay._tcp` bằng mDNS responder được bundle trong backend. Listener được bind trước khi service được quảng bá, tránh trường hợp iPad nhìn thấy receiver nhưng không thể kết nối.
 
-## Hành vi dự kiến
+## Kết nối
 
-Khi native receiver hoàn thiện, PadMirror sẽ đăng ký dịch vụ AirPlay qua Bonjour (`dns_sd`) ngay trong process với tên receiver `PadMirror-PC`. Nếu Bonjour không có trên máy, AirPlay chuyển sang `Unavailable`.
+1. Mở PadMirror và chờ trạng thái **READY TO MIRROR**.
+2. Trên iPad, mở **Control Center → Screen Mirroring**.
+3. Chọn receiver theo tên trong Settings, mặc định là `PadMirror`.
+4. Khi kết nối, UI chuyển `Connecting` rồi `Streaming`.
 
-1. Mở PadMirror -> Settings.
-2. Connection -> `AirPlay Wi-Fi`.
-3. Trên iPad mở Control Center -> Screen Mirroring -> `PadMirror-PC`.
-
-Video H.264/HEVC và audio L16 được đưa thẳng vào cùng `MediaEngine` (GStreamer + D3D11 + WASAPI) mà USB dùng. Khi USB đang streaming, kết nối AirPlay bị từ chối với trạng thái `BUSY`; cắm USB trong lúc AirPlay đang chạy chỉ hiển thị `USB AVAILABLE` chứ không tự ngắt AirPlay.
+AirPlay bắt buộc thao tác từ iPad. PadMirror không thể tự chọn iPad hoặc tự bắt đầu Screen Mirroring.
 
 ## Firewall
 
-Hiện không có script firewall nào được đóng gói. Nếu về sau cần cấu hình firewall, rule sẽ được scope vào `PadMirror.exe` (sau M6/M7), không phải cho `uxplay.exe`.
+Receiver phải nhận inbound TCP/UDP. Release cung cấp helper:
 
-## Licensing
+```text
+dependencies\configure-airplay-firewall.ps1
+```
 
-Sản phẩm giữ license hiện tại (MIT) cho tới khi mã native dẫn xuất từ UxPlay thực sự được vendored vào binary. Tại thời điểm gated đó, license chuyển sang GPL-3.0-or-later kèm complete corresponding source. Hiện tại chưa nhúng mã UxPlay và không có source archive GPL nào được ship.
+Helper tạo hai inbound rules:
+
+- `PadMirror AirPlay (UDP In)`
+- `PadMirror AirPlay (TCP In)`
+
+Cả hai:
+
+- Gắn với đường dẫn tuyệt đối của `PadMirror.exe`.
+- Chỉ áp dụng `Private,Domain`.
+- Không mở cho mọi chương trình.
+- Có thể chạy lại để thay rules cũ khi executable đổi đường dẫn.
+
+### Installer
+
+Task **Allow PadMirror through Windows Firewall (Private and Domain networks)** bỏ chọn mặc định. Chỉ khi người dùng chọn task, installer mới gọi PowerShell với `runas`; Windows hiển thị UAC trước khi thay đổi firewall.
+
+### Portable
+
+Package portable không tự thay firewall. Từ PowerShell **Run as Administrator** tại thư mục package:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File .\dependencies\configure-airplay-firewall.ps1 `
+  -ExePath .\PadMirror.exe
+```
+
+Không nên tạo rule cho `uxplay.exe`: file đó không tồn tại trong kiến trúc PadMirror.
+
+## Chẩn đoán discovery
+
+Nếu iPad không thấy receiver:
+
+1. Xác nhận PadMirror đang ở **Ready**, không phải Error/Stopped.
+2. Mở **Diagnostics** và kiểm tra RAOP listener có TCP port.
+3. Xác nhận iPad/PC cùng subnet và không ở guest network.
+4. Kiểm tra Windows profile là Private:
+
+   ```powershell
+   Get-NetConnectionProfile
+   ```
+
+5. Kiểm tra rules:
+
+   ```powershell
+   Get-NetFirewallRule -DisplayName "PadMirror*" |
+     Format-Table DisplayName, Enabled, Direction, Action, Profile
+   ```
+
+6. Tắt tạm VPN/virtual NIC không dùng, restart receiver rồi mở lại Screen Mirroring.
+7. Xem `padmirror.log` và `gstreamer.log` từ nút **Open Log Folder** trong Diagnostics.
+
+Nếu receiver xuất hiện nhưng kết nối thất bại, kiểm tra TCP rule, listener port và log RAOP/RTSP. Nếu kết nối có hình nhưng không âm thanh, kiểm tra runtime report có `libfdk-aac-2.dll`, `wasapi2sink` và thiết bị audio output hợp lệ.
+
+## Receiver identity
+
+PadMirror tạo MAC locally administered, unicast và ổn định từ receiver identity. Identity ổn định giúp iPad không coi mỗi lần start là một receiver hoàn toàn mới. Đổi receiver name/FPS làm receiver restart và publish lại records; volume/mute không cần restart.
+
+## Độ trễ
+
+AirPlay latency phụ thuộc Wi-Fi congestion, AP scheduling, iPadOS, GPU decode, audio device và display. Dùng Ethernet cho PC khi có thể, Wi-Fi 5/6 ổn định cho iPad, tránh repeater/mesh hop và đo thực tế theo [latency-testing.md](latency-testing.md).

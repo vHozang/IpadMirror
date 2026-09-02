@@ -345,8 +345,11 @@ raop_rtp_process_events(raop_rtp_t *raop_rtp, void *cb_data)
         }
     }
 
-    /* Handle flush if requested */
+    /* Drop stale RTP data before resetting decoder and renderer state. */
     if (flush != NO_FLUSH) {
+        logger_log(raop_rtp->logger, LOGGER_INFO,
+                   "Flushing RAOP audio buffer; next sequence=%d", flush);
+        raop_buffer_flush(raop_rtp->buffer, flush);
         if (raop_rtp->callbacks.audio_flush) {
             raop_rtp->callbacks.audio_flush(raop_rtp->callbacks.cls);
         }
@@ -402,6 +405,56 @@ static uint64_t rtp_time_to_client_ntp(raop_rtp_t *raop_rtp,  uint32_t rtp32) {
         return 0;
     } else {
         return (uint64_t) incr;
+    }
+}
+
+static void
+raop_rtp_drain_audio_buffer(raop_rtp_t *raop_rtp, int no_resend,
+                            bool logger_debug_data, const char *type)
+{
+    if (!raop_rtp->initial_sync) {
+        return;
+    }
+
+    void *payload = NULL;
+    unsigned int payload_size = 0;
+    unsigned short seqnum = 0;
+    uint32_t rtp_timestamp = 0;
+
+    while ((payload = raop_buffer_dequeue(raop_rtp->buffer, &payload_size,
+                                          &rtp_timestamp, &seqnum, no_resend))) {
+        audio_decode_struct audio_data;
+        audio_data.rtp_time = rtp_timestamp;
+        audio_data.seqnum = seqnum;
+        audio_data.data_len = payload_size;
+        audio_data.data = payload;
+        audio_data.ct = raop_rtp->ct;
+        audio_data.ntp_time_remote = rtp_time_to_client_ntp(raop_rtp, rtp_timestamp);
+        audio_data.ntp_time_local = raop_ntp_convert_remote_time(
+            raop_rtp->ntp, audio_data.ntp_time_remote);
+
+        if (logger_debug_data) {
+            uint64_t ntp_now = raop_ntp_get_local_time();
+            int64_t latency = audio_data.ntp_time_local
+                ? ((int64_t) ntp_now) - ((int64_t) audio_data.ntp_time_local)
+                : 0;
+            logger_log(raop_rtp->logger, LOGGER_DEBUG,
+                       "raop_rtp audio: now = %8.6f, ntp = %8.6f, latency = %9.6f, ts = %8.6f, rtp_time=%u seqnum = %5u %s %d",
+                       (double) ntp_now / SEC,
+                       (double) audio_data.ntp_time_local / SEC,
+                       (double) latency / SEC,
+                       (double) audio_data.ntp_time_remote / SEC,
+                       rtp_timestamp, seqnum, type, payload_size);
+        }
+
+        raop_rtp->callbacks.audio_process(
+            raop_rtp->callbacks.cls, raop_rtp->ntp, &audio_data);
+        free(payload);
+    }
+
+    if (!no_resend) {
+        raop_buffer_handle_resends(
+            raop_rtp->buffer, raop_rtp_resend_callback, raop_rtp);
     }
 }
 
@@ -465,10 +518,7 @@ raop_rtp_thread_udp(void *arg)
         FD_SET(raop_rtp->dsock, &rfds);
 
         int ret = select(nfds, &rfds, NULL, NULL, &tv);
-        if (ret == 0) {
-            /* Timeout happened */
-            continue;
-        } else if (ret == -1) {
+        if (ret == -1) {
             int sock_err = SOCKET_GET_ERROR();
             logger_log(raop_rtp->logger, LOGGER_ERR,
                        "raop_rtp error in select %d %s", sock_err, SOCKET_ERROR_STRING(sock_err));
@@ -631,45 +681,11 @@ raop_rtp_thread_udp(void *arg)
 
             raop_buffer_enqueue(raop_rtp->buffer, packet, packetlen, 1);
 
-            if (!raop_rtp->initial_sync) {
-                /* wait until the first sync before dequeing ALAC */
-                continue;
-            } else {
-            // Render continuous buffer entries
-                void *payload = NULL;
-                unsigned int payload_size = 0;
-                unsigned short seqnum = 0;
-                uint32_t rtp_timestamp = 0;
-
-                while ((payload = raop_buffer_dequeue(raop_rtp->buffer, &payload_size, &rtp_timestamp, &seqnum, no_resend))) {
-                    audio_decode_struct audio_data; 
-                    audio_data.rtp_time = rtp_timestamp;
-                    audio_data.seqnum = seqnum;
-                    audio_data.data_len = payload_size;
-                    audio_data.data = payload;
-                    audio_data.ct = raop_rtp->ct;
-                    audio_data.ntp_time_remote = rtp_time_to_client_ntp(raop_rtp, rtp_timestamp);
-                    audio_data.ntp_time_local  = raop_ntp_convert_remote_time(raop_rtp->ntp, audio_data.ntp_time_remote);
-
-                    if (logger_debug_data) {
-                        uint64_t ntp_now = raop_ntp_get_local_time();
-                        int64_t latency = (audio_data.ntp_time_local ? ((int64_t) ntp_now) - ((int64_t) audio_data.ntp_time_local) : 0); 
-                        logger_log(raop_rtp->logger, LOGGER_DEBUG,
-                                   "raop_rtp audio: now = %8.6f, ntp = %8.6f, latency = %9.6f, ts = %8.6f, rtp_time=%u seqnum = %5u %s %d",
-                                   (double) ntp_now / SEC, (double) audio_data.ntp_time_local / SEC, (double) latency / SEC,
-                                   (double) audio_data.ntp_time_remote /SEC, rtp_timestamp, seqnum, type, payload_size);
-                    }
-
-                    raop_rtp->callbacks.audio_process(raop_rtp->callbacks.cls, raop_rtp->ntp, &audio_data);
-                    free(payload);
-                }
-
-                /* Handle possible resend requests */
-                if (!no_resend) {
-                    raop_buffer_handle_resends(raop_rtp->buffer, raop_rtp_resend_callback, raop_rtp);
-                }
-            }
         }
+
+        /* Drive playout and resend deadlines even when no new UDP packet arrives. */
+        raop_rtp_drain_audio_buffer(
+            raop_rtp, no_resend, logger_debug_data, type);
     }
 
     // Ensure running reflects the actual state

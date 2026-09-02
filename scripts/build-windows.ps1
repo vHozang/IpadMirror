@@ -4,7 +4,6 @@ param(
     [string]$PortableMsvcRoot = $env:PADMIRROR_MSVC_ROOT,
     [string]$ToolsRoot = "D:\PadMirrorTools",
     [string]$GStreamerVersion = "1.28.5",
-    [switch]$EnableIMobileDevice,
     [switch]$SkipInstaller,
     [switch]$InstallMissing = $true
 )
@@ -76,6 +75,21 @@ function Download-MicrosoftSigned([string]$Uri, [string]$Destination) {
     }
 }
 
+function Download-VerifiedFile(
+    [string]$Uri,
+    [string]$Destination,
+    [string]$Sha256
+) {
+    if (-not (Test-Path $Destination)) {
+        Invoke-WebRequest -Uri $Uri -OutFile $Destination -UseBasicParsing
+    }
+    $actualHash = (Get-FileHashWithRetry $Destination).Hash
+    if ($actualHash -ne $Sha256.ToLowerInvariant()) {
+        Remove-Item $Destination -Force -ErrorAction SilentlyContinue
+        throw "SHA-256 verification failed for $Uri (expected $Sha256, got $actualHash)"
+    }
+}
+
 function Get-FileHashWithRetry([string]$Path) {
     for ($attempt = 0; $attempt -lt 40; $attempt++) {
         try {
@@ -130,7 +144,10 @@ function Assert-NoForbiddenPayload([string]$Root) {
         Get-ChildItem -LiteralPath $Root -Recurse -Force -File | Where-Object {
             $_.Name -match '^(?i:wintun\.dll|libusb.*\.dll|uxplay\.exe|.*\.sys|.*\.inf|PadMirrorUsbBridge.*|PadMirrorWinUsbSetup\.exe)$' -or
             $_.Name -match '(?i)obs-gstreamer' -or
-            $_.FullName -match '(?i)[\\/](UsbDk|usb-bridge|uxplay|obs-plugin)(?:[\\/]|$)'
+            $_.FullName -match '(?i)[\\/](UsbDk|usb-bridge|obs-plugin|qml|QtQml)(?:[\\/]|$)' -or
+            $_.FullName -match '(?i)[\\/](usb|quicktime|capture-driver)(?:[\\/]|$)' -or
+            ($_.FullName -match '(?i)[\\/]uxplay(?:[\\/]|$)' -and
+                $_.FullName -notmatch '(?i)[\\/]licenses[\\/]UxPlay[\\/]')
         }
     )
     if ($forbidden.Count -ne 0) {
@@ -145,6 +162,20 @@ $binaryDir = Join-Path $buildDir "src"
 $releaseDir = Join-Path $buildDir "stage"
 $distDir = Join-Path $repoRoot "dist"
 $downloadDir = Join-Path $ToolsRoot "downloads"
+$projectVersion = "1.0.0"
+$fdkAacVersion = "2.0.3"
+$fdkAacSourceSha256 = "e25671cd96b10bad896aa42ab91a695a9e573395262baed4e4a2ff178d6a3a78"
+$qtVersion = "6.8.3"
+$qtSourceArchives = @(
+    @{
+        Name = "qtbase-everywhere-src-$qtVersion.tar.xz"
+        Sha256 = "56001b905601bb9023d399f3ba780d7fa940f3e4861e496a7c490331f49e0b80"
+    },
+    @{
+        Name = "qtsvg-everywhere-src-$qtVersion.tar.xz"
+        Sha256 = "35eb516460f00f264eb504baa253432384351cf23fb9980a5857190e8deef438"
+    }
+)
 
 if ($InstallMissing) {
     & (Join-Path $PSScriptRoot "install-build-dependencies.ps1") `
@@ -225,7 +256,6 @@ $env:PKG_CONFIG_PATH = @(
     (Join-Path $GStreamerRoot "share\pkgconfig")
 ) -join ";"
 
-$imobile = if ($EnableIMobileDevice) { "ON" } else { "OFF" }
 $configureArgs = @(
     "-S", $repoRoot,
     "-B", $buildDir,
@@ -235,7 +265,7 @@ $configureArgs = @(
     "-DCMAKE_C_COMPILER=cl.exe",
     "-DCMAKE_CXX_COMPILER=cl.exe",
     "-DCMAKE_PREFIX_PATH=$QtRoot",
-    "-DPADMIRROR_ENABLE_IMOBILEDEVICE=$imobile",
+    "-DPADMIRROR_BUILD_APP=ON",
     "-DPADMIRROR_OPENSSL_ROOT=$GStreamerRoot",
     "-DPADMIRROR_BUILD_TESTS=ON"
 )
@@ -292,8 +322,9 @@ Copy-Item $builtRuntimeChecker $runtimeChecker -Force
 Invoke-NativeProcess (Join-Path $QtRoot "bin\windeployqt.exe") @(
     "--release",
     "--no-translations",
+    "--no-quick-import",
+    "--no-system-d3d-compiler",
     "--verbose", "0",
-    "--qmldir", (Join-Path $repoRoot "ui"),
     $exe
 ) "windeployqt failed"
 
@@ -325,13 +356,14 @@ $requiredPlugins = @(
     "gstapp.dll",
     "gstcoreelements.dll",
     "gstvideoparsersbad.dll",
+    "gstvideoconvertscale.dll",
     "gstaudioconvert.dll",
     "gstaudioresample.dll",
+    "gstvolume.dll",
+    "gstlevel.dll",
     "gstd3d11.dll",
-    "gstnvcodec.dll",
     "gstlibav.dll",
-    "gstwasapi2.dll",
-    "gstwasapi.dll"
+    "gstwasapi2.dll"
 )
 foreach ($plugin in $requiredPlugins) {
     $pluginPath = Join-Path $pluginSource $plugin
@@ -351,21 +383,59 @@ if (Test-Path $scannerSource) {
 
 $dependenciesDir = Join-Path $releaseDir "dependencies"
 New-Item -ItemType Directory -Force -Path $dependenciesDir | Out-Null
-Copy-Item (Join-Path $PSScriptRoot "repair-runtime.ps1") $dependenciesDir -Force
+Copy-Item (Join-Path $PSScriptRoot "configure-airplay-firewall.ps1") $dependenciesDir -Force
 
 New-Item -ItemType Directory -Force -Path $downloadDir | Out-Null
 $vcRedist = Join-Path $downloadDir "VC_redist.x64.exe"
 Download-MicrosoftSigned "https://aka.ms/vs/17/release/vc_redist.x64.exe" $vcRedist
 Copy-Item $vcRedist $dependenciesDir -Force
 
-# AirPlay (in-process, gated to M6/M7) and USB (Apple user-mode channel, gated
-# to M2) do not ship any external process, driver helper, firewall rule, or
-# UxPlay bundle. Nothing is staged for them here until those milestones land.
+# AirPlay runs in-process. The package intentionally contains no external
+# receiver, relay, driver helper, or automatic firewall modification.
 
-$licenseTarget = Join-Path $releaseDir "licenses\PadMirror"
+$licenseRoot = Join-Path $releaseDir "licenses"
+$licenseTarget = Join-Path $licenseRoot "PadMirror"
 New-Item -ItemType Directory -Force -Path $licenseTarget | Out-Null
 Copy-Item (Join-Path $repoRoot "LICENSES\THIRD_PARTY.md") $licenseTarget -Force
+Copy-Item (Join-Path $repoRoot "LICENSES\FDK-AAC-LICENSE.txt") $licenseTarget -Force
+Copy-Item (Join-Path $repoRoot "LICENSES\FDK-AAC-SOURCE.md") $licenseTarget -Force
+Copy-Item (Join-Path $repoRoot "LICENSES\QT-SOURCE.md") $licenseTarget -Force
+Copy-Item (Join-Path $repoRoot "LICENSES\QT-LGPL-3.0-only.txt") $licenseTarget -Force
 Copy-Item (Join-Path $repoRoot "LICENSE") $licenseTarget -Force
+
+$uxplayLicenseTarget = Join-Path $licenseRoot "UxPlay"
+New-Item -ItemType Directory -Force -Path $uxplayLicenseTarget | Out-Null
+Copy-Item (Join-Path $repoRoot "third_party\uxplay-native\LICENSE") $uxplayLicenseTarget -Force
+Copy-Item (Join-Path $repoRoot "third_party\uxplay-native\lib\playfair\LICENSE.md") `
+    (Join-Path $uxplayLicenseTarget "PLAYFAIR-LICENSE.md") -Force
+Copy-Item (Join-Path $repoRoot "third_party\uxplay-native\lib\llhttp\LICENSE-MIT") `
+    (Join-Path $uxplayLicenseTarget "LLHTTP-LICENSE-MIT.txt") -Force
+Copy-Item (Join-Path $repoRoot "third_party\libplist\COPYING.LESSER.txt") `
+    (Join-Path $licenseRoot "LIBPLIST-LGPL-2.1.txt") -Force
+
+$gstreamerLicenseSource = Join-Path $GStreamerRoot "share\licenses"
+Require-Path $gstreamerLicenseSource "GStreamer license inventory"
+Copy-Item $gstreamerLicenseSource (Join-Path $licenseRoot "GStreamer") -Recurse -Force
+
+$fdkAacSourceDir = Join-Path $licenseRoot "sources"
+New-Item -ItemType Directory -Force -Path $fdkAacSourceDir | Out-Null
+$fdkAacSourceArchive = Join-Path $downloadDir "fdk-aac-$fdkAacVersion.tar.gz"
+Download-VerifiedFile `
+    "https://github.com/mstorsjo/fdk-aac/archive/refs/tags/v$fdkAacVersion.tar.gz" `
+    $fdkAacSourceArchive `
+    $fdkAacSourceSha256
+Copy-Item $fdkAacSourceArchive $fdkAacSourceDir -Force
+
+$qtSourceDir = Join-Path $fdkAacSourceDir "Qt"
+New-Item -ItemType Directory -Force -Path $qtSourceDir | Out-Null
+foreach ($archive in $qtSourceArchives) {
+    $qtSourceArchive = Join-Path $downloadDir $archive.Name
+    Download-VerifiedFile `
+        "https://download.qt.io/archive/qt/6.8/$qtVersion/submodules/$($archive.Name)" `
+        $qtSourceArchive `
+        $archive.Sha256
+    Copy-Item $qtSourceArchive $qtSourceDir -Force
+}
 
 $runtimeReport = Join-Path $env:TEMP "padmirror-runtime-check.txt"
 $runtimeRegistry = Join-Path $env:TEMP ("padmirror-runtime-registry-{0}.bin" -f [Guid]::NewGuid().ToString("N"))
@@ -409,6 +479,7 @@ if (-not $SkipInstaller) {
     $isccArguments = @(
         "/DReleaseDir=$releaseDir",
         "/DDistDir=$distDir",
+        "/DAppVersion=$projectVersion",
         $installerScript
     )
     Invoke-NativeProcess $iscc $isccArguments "Inno Setup packaging failed"

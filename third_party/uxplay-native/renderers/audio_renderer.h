@@ -32,6 +32,21 @@ extern "C" {
 #include <stdbool.h>
 #include "../lib/logger.h"
 
+typedef struct audio_renderer_stats_s {
+    uint64_t appsrc_queued_ns;
+    uint64_t queue_queued_ns;
+    int64_t pts_lead_ns;
+    uint64_t pushed_buffers;
+    uint64_t appsrc_dropped;
+    uint64_t queue_dropped;
+    uint64_t appsrc_failures;
+    uint64_t reanchors;
+    uint64_t concealed_frames;
+    uint64_t decoder_resets;
+    uint64_t latency_recoveries;
+    uint64_t generation;
+} audio_renderer_stats_t;
+
 bool gstreamer_init();
 void audio_renderer_init(logger_t *logger, const char* audiosink, const bool *audio_sync, const bool *video_sync, const char *artp_pipeline);
 void audio_renderer_start(unsigned char* compression_type);
@@ -39,6 +54,7 @@ void audio_renderer_stop();
 void audio_renderer_render_buffer(unsigned char* data, int *data_len, unsigned short *seqnum, uint64_t *ntp_time);
 void audio_renderer_set_volume(double volume);
 void audio_renderer_flush();
+bool audio_renderer_get_stats(audio_renderer_stats_t *stats);
 void audio_renderer_destroy();
 unsigned int audio_renderer_listen(void *loop, int id);
 #ifdef __cplusplus

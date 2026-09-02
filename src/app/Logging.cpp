@@ -1,8 +1,10 @@
 #include "app/Logging.h"
 
+#include <QCoreApplication>
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QStandardPaths>
 #include <QTextStream>
 
@@ -15,6 +17,36 @@ namespace {
 
 std::mutex logMutex;
 std::unique_ptr<QFile> logFile;
+constexpr qint64 maximumLogBytes = 4 * 1024 * 1024;
+
+QString loggingDirectory() {
+    return QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)
+        + QStringLiteral("/logs");
+}
+
+void rotateLog(const QString& path, bool everyLaunch = false) {
+    const QFileInfo info(path);
+    if (!info.exists() || (!everyLaunch && info.size() < maximumLogBytes)) {
+        return;
+    }
+    QFile::remove(path + QStringLiteral(".1"));
+    QFile::rename(path, path + QStringLiteral(".1"));
+}
+
+QByteArray sessionHeader() {
+    return QStringLiteral(
+               "=== PadMirror native session ===\n"
+               "started=%1\n"
+               "pid=%2\n"
+               "version=%3\n"
+               "executable=%4\n"
+               "===============================\n")
+        .arg(QDateTime::currentDateTime().toString(Qt::ISODateWithMs))
+        .arg(QCoreApplication::applicationPid())
+        .arg(QCoreApplication::applicationVersion(),
+             QCoreApplication::applicationFilePath())
+        .toUtf8();
+}
 
 const char* levelName(QtMsgType type) {
     switch (type) {
@@ -50,24 +82,47 @@ void messageHandler(QtMsgType type, const QMessageLogContext&, const QString& me
 } // namespace
 
 void installLogging() {
-    const auto directoryPath = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)
-        + QStringLiteral("/logs");
+    const auto directoryPath = loggingDirectory();
     QDir().mkpath(directoryPath);
-    logFile = std::make_unique<QFile>(directoryPath + QStringLiteral("/padmirror.log"));
+    const auto applicationLogPath =
+        directoryPath + QStringLiteral("/padmirror.log");
+    const auto gstreamerLogPath =
+        directoryPath + QStringLiteral("/gstreamer.log");
+    rotateLog(applicationLogPath);
+    rotateLog(gstreamerLogPath, true);
+
+    logFile = std::make_unique<QFile>(applicationLogPath);
     logFile->open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text);
     qInstallMessageHandler(messageHandler);
 
-    // This is a WIN32 GUI subsystem app, so anything written to stderr (the
-    // GStreamer default log sink, plus PadMirror's own pipeline bus diagnostics
-    // such as the [audio-eld] burst-governor lines) is otherwise discarded --
-    // there is no attached console. Always redirect stderr to a dedicated file
-    // so those native-layer diagnostics can be inspected after a session. This
-    // is safe by default: GStreamer only emits to stderr at WARNING/ERROR unless
-    // GST_DEBUG is set, so the file does not grow unboundedly in normal use.
-    {
-        const auto gstLogPath = directoryPath + QStringLiteral("/gstreamer.log");
-        std::freopen(gstLogPath.toLocal8Bit().constData(), "a", stderr);
+    // The GUI subsystem has no attached console. Start a fresh native log on
+    // every launch so hardware-test evidence always identifies one process.
+    FILE* nativeLog = nullptr;
+#if defined(_WIN32)
+    const bool nativeLogOpened =
+        freopen_s(
+            &nativeLog,
+            gstreamerLogPath.toLocal8Bit().constData(),
+            "w",
+            stderr) == 0 &&
+        nativeLog;
+#else
+    nativeLog = std::freopen(
+        gstreamerLogPath.toLocal8Bit().constData(),
+        "w",
+        stderr);
+    const bool nativeLogOpened = nativeLog != nullptr;
+#endif
+    if (nativeLogOpened) {
+        std::setvbuf(stderr, nullptr, _IOLBF, BUFSIZ);
+        const auto header = sessionHeader();
+        std::fwrite(header.constData(), 1, static_cast<std::size_t>(header.size()), stderr);
+        std::fflush(stderr);
     }
+}
+
+QString logDirectoryPath() {
+    return loggingDirectory();
 }
 
 } // namespace padmirror::app

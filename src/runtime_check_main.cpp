@@ -4,11 +4,15 @@
 #include <QFile>
 #include <QTextStream>
 
+#ifndef PADMIRROR_VERSION
+#define PADMIRROR_VERSION "1.0.0"
+#endif
+
 int main(int argc, char* argv[]) {
     QCoreApplication application(argc, argv);
     QCoreApplication::setOrganizationName(QStringLiteral("PadMirror"));
     QCoreApplication::setApplicationName(QStringLiteral("PadMirrorRuntimeCheck"));
-    QCoreApplication::setApplicationVersion(QStringLiteral("1.0.0"));
+    QCoreApplication::setApplicationVersion(QStringLiteral(PADMIRROR_VERSION));
 
     padmirror::app::RuntimeDependencies::configureEnvironment();
     const auto missing = padmirror::app::RuntimeDependencies::missingComponents();

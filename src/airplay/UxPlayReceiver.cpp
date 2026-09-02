@@ -1,5 +1,7 @@
 #include "airplay/UxPlayReceiver.h"
 
+#include "support/ReceiverIdentity.h"
+
 #if defined(_MSC_VER)
 #include <BaseTsd.h>
 #ifndef _SSIZE_T_DEFINED
@@ -22,7 +24,6 @@ extern "C" {
 #include <cmath>
 #include <cstdio>
 #include <cstring>
-#include <random>
 #include <string_view>
 
 #if defined(_WIN32)
@@ -33,74 +34,88 @@ extern "C" {
 
 namespace padmirror::airplay {
 
-struct UxPlayReceiver::Context {
-    StateCallback stateCallback;
+struct ReceiverContext {
+    UxPlayReceiver::StateCallback stateCallback;
+    UxPlayReceiver::DiagnosticsCallback diagnosticsCallback;
     std::atomic<bool> active{false};
     std::atomic<int> openConnections{0};
-    std::atomic<std::uint64_t> remoteClockOffset{0};
+    std::atomic<std::uint64_t> videoClockOffset{0};
     std::atomic<std::uintptr_t> windowHandle{0};
     std::mutex rendererMutex;
+    std::mutex diagnosticsMutex;
     logger_t* renderLogger = nullptr;
-    std::string receiverName;
+    ReceiverDiagnostics diagnostics;
+    std::atomic<double> outputGain{1.0};
+    std::atomic<double> clientGain{1.0};
+    std::atomic<bool> muted{false};
+    std::atomic<std::uint64_t> videoStatsGeneration{0};
+    std::atomic<std::uint64_t> audioStatsGeneration{0};
 
-    void publish(ReceiverState state, std::string detail) const {
-        if (active.load(std::memory_order_acquire) && stateCallback) {
+    void publish(ReceiverState state, std::string detail) {
+        if (!active.load(std::memory_order_acquire)) {
+            return;
+        }
+        ReceiverDiagnostics snapshot;
+        {
+            std::lock_guard lock(diagnosticsMutex);
+            diagnostics.state = state;
+            diagnostics.detail = detail;
+            snapshot = diagnostics;
+        }
+        if (stateCallback) {
             stateCallback(state, detail);
+        }
+        if (diagnosticsCallback) {
+            diagnosticsCallback(snapshot);
+        }
+    }
+
+    template <typename Update>
+    void updateDiagnostics(Update update) {
+        if (!active.load(std::memory_order_acquire)) {
+            return;
+        }
+        ReceiverDiagnostics snapshot;
+        {
+            std::lock_guard lock(diagnosticsMutex);
+            update(diagnostics);
+            snapshot = diagnostics;
+        }
+        if (diagnosticsCallback) {
+            diagnosticsCallback(snapshot);
         }
     }
 };
 
 namespace {
 
-std::string randomMac() {
-    std::random_device source;
-    std::uniform_int_distribution<int> byte(0, 255);
-    std::array<unsigned char, 6> bytes{};
-    for (auto& value : bytes) {
-        value = static_cast<unsigned char>(byte(source));
-    }
-    bytes[0] = static_cast<unsigned char>((bytes[0] & ~0x01U) | 0x02U);
-
-    char text[18]{};
-    std::snprintf(text, sizeof(text), "%02x:%02x:%02x:%02x:%02x:%02x",
-                  bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]);
-    return text;
-}
-
-std::string stableMac() {
+std::string machineIdentity() {
     char host[256]{};
-    if (gethostname(host, sizeof(host) - 1) != 0 || host[0] == '\0') {
-        return randomMac();
+    if (gethostname(host, sizeof(host) - 1) == 0 && host[0] != '\0') {
+        return host;
     }
-
-    std::uint64_t hash = 1469598103934665603ULL;
-    for (const unsigned char value : std::string_view(host)) {
-        hash ^= value;
-        hash *= 1099511628211ULL;
-    }
-
-    std::array<unsigned char, 6> bytes{};
-    for (int index = 0; index < 6; ++index) {
-        bytes[index] = static_cast<unsigned char>((hash >> (8 * index)) & 0xffU);
-    }
-    bytes[0] = static_cast<unsigned char>((bytes[0] & ~0x01U) | 0x02U);
-
-    char text[18]{};
-    std::snprintf(text, sizeof(text), "%02x:%02x:%02x:%02x:%02x:%02x",
-                  bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]);
-    return text;
+    return "PadMirror";
 }
 
-std::array<char, 6> parseMac(const std::string& value) {
-    std::array<char, 6> result{};
-    unsigned int bytes[6]{};
-    if (std::sscanf(value.c_str(), "%x:%x:%x:%x:%x:%x",
-                    &bytes[0], &bytes[1], &bytes[2], &bytes[3], &bytes[4], &bytes[5]) == 6) {
-        for (int index = 0; index < 6; ++index) {
-            result[index] = static_cast<char>(bytes[index]);
-        }
+const char* audioCodecName(unsigned char compressionType) {
+    switch (compressionType) {
+    case 1: return "PCM";
+    case 2: return "ALAC";
+    case 8: return "AAC-ELD";
+    default: return "Unknown";
     }
-    return result;
+}
+
+void applyAudioOutput(ReceiverContext* context) {
+    if (!context) {
+        return;
+    }
+    constexpr double outputHeadroom = 0.8912509381337456; // -1 dB
+    const bool muted = context->muted.load(std::memory_order_acquire);
+    const double outputGain = context->outputGain.load(std::memory_order_acquire);
+    const double clientGain = context->clientGain.load(std::memory_order_acquire);
+    audio_renderer_set_volume(
+        muted ? 0.0 : clientGain * outputGain * outputHeadroom);
 }
 
 void configureFeatures(dnssd_t* dnssd) {
@@ -130,11 +145,11 @@ void receiverLog(void*, int level, const char* message) {
     }
 }
 
-void initializeVideoRenderer(UxPlayReceiver::Context* context) {
+void initializeVideoRenderer(ReceiverContext* context) {
     videoflip_t flip[2] = {NONE, NONE};
     video_renderer_set_window_handle(context->windowHandle.load(std::memory_order_acquire));
     video_renderer_init(context->renderLogger,
-                        context->receiverName.c_str(),
+                        context->diagnostics.receiverName.c_str(),
                         flip,
                         "h264parse",
                         "",
@@ -143,7 +158,7 @@ void initializeVideoRenderer(UxPlayReceiver::Context* context) {
                         "d3d11videosink",
                         " force-aspect-ratio=true redraw-on-update=true",
                         false,
-                        true,
+                        false,
                         true,
                         false,
                         3,
@@ -151,7 +166,7 @@ void initializeVideoRenderer(UxPlayReceiver::Context* context) {
     video_renderer_start();
 }
 
-void resetVideoRenderer(UxPlayReceiver::Context* context) {
+void resetVideoRenderer(ReceiverContext* context) {
     if (!context || !context->active.load(std::memory_order_acquire)) {
         return;
     }
@@ -159,29 +174,65 @@ void resetVideoRenderer(UxPlayReceiver::Context* context) {
     video_renderer_stop();
     video_renderer_destroy();
     initializeVideoRenderer(context);
-    context->remoteClockOffset.store(0, std::memory_order_release);
+    context->videoClockOffset.store(0, std::memory_order_release);
 }
 
 extern "C" {
 
 void uxConnInit(void* cls) {
-    auto* context = static_cast<UxPlayReceiver::Context*>(cls);
+    auto* context = static_cast<ReceiverContext*>(cls);
     if (!context) {
         return;
     }
-    context->openConnections.fetch_add(1, std::memory_order_acq_rel);
-    context->publish(ReceiverState::Streaming, "AirPlay client connected");
+    const int connectionCount =
+        context->openConnections.fetch_add(1, std::memory_order_acq_rel) + 1;
+    context->updateDiagnostics([connectionCount](ReceiverDiagnostics& diagnostics) {
+        diagnostics.connectionCount = connectionCount;
+    });
+    context->publish(ReceiverState::Connecting, "AirPlay client connected; preparing stream");
 }
 
 void uxConnDestroy(void* cls) {
-    auto* context = static_cast<UxPlayReceiver::Context*>(cls);
+    auto* context = static_cast<ReceiverContext*>(cls);
     if (!context) {
         return;
     }
     const int previous = context->openConnections.fetch_sub(1, std::memory_order_acq_rel);
+    const int connectionCount = std::max(0, previous - 1);
+    context->updateDiagnostics([connectionCount](ReceiverDiagnostics& diagnostics) {
+        diagnostics.connectionCount = connectionCount;
+        if (connectionCount == 0) {
+            diagnostics.clientName.clear();
+            diagnostics.clientModel.clear();
+            diagnostics.videoCodec.clear();
+            diagnostics.videoWidth = 0;
+            diagnostics.videoHeight = 0;
+            diagnostics.videoInputFps = 0.0;
+            diagnostics.videoSinkFps = 0.0;
+            diagnostics.videoQueueBuffers = 0;
+            diagnostics.videoQueueDropped = 0;
+            diagnostics.videoQosDropped = 0;
+            diagnostics.videoAppsrcFailures = 0;
+            diagnostics.videoInputPtsDeltaMs = 0.0;
+            diagnostics.videoSinkPtsDeltaMs = 0.0;
+            diagnostics.videoSinkPtsLeadMs = 0.0;
+            diagnostics.audioCodec.clear();
+            diagnostics.audioSampleRate = 0;
+            diagnostics.audioAppsrcQueuedNs = 0;
+            diagnostics.audioQueueQueuedNs = 0;
+            diagnostics.audioPtsLeadNs = 0;
+            diagnostics.audioAppsrcDropped = 0;
+            diagnostics.audioQueueDropped = 0;
+            diagnostics.audioAppsrcFailures = 0;
+            diagnostics.audioReanchors = 0;
+            diagnostics.audioConcealedFrames = 0;
+            diagnostics.audioDecoderResets = 0;
+            diagnostics.audioLatencyRecoveries = 0;
+        }
+    });
     if (previous <= 1) {
         context->openConnections.store(0, std::memory_order_release);
-        context->remoteClockOffset.store(0, std::memory_order_release);
+        context->videoClockOffset.store(0, std::memory_order_release);
         std::lock_guard lock(context->rendererMutex);
         audio_renderer_stop();
         context->publish(ReceiverState::Waiting, "Ready for AirPlay");
@@ -192,11 +243,11 @@ void uxConnFeedback(void*) {
 }
 
 void uxConnReset(void* cls, int reason) {
-    auto* context = static_cast<UxPlayReceiver::Context*>(cls);
+    auto* context = static_cast<ReceiverContext*>(cls);
     if (!context) {
         return;
     }
-    context->remoteClockOffset.store(0, std::memory_order_release);
+    context->videoClockOffset.store(0, std::memory_order_release);
     if (reason == 1) {
         context->publish(ReceiverState::Error, "AirPlay client connection was lost");
     } else if (reason == 2) {
@@ -205,47 +256,88 @@ void uxConnReset(void* cls, int reason) {
 }
 
 void uxAudioProcess(void* cls, raop_ntp_t*, audio_decode_struct* data) {
-    auto* context = static_cast<UxPlayReceiver::Context*>(cls);
+    auto* context = static_cast<ReceiverContext*>(cls);
     if (!context || !data || !data->data || data->data_len <= 0) {
         return;
     }
 
-    std::uint64_t offset = context->remoteClockOffset.load(std::memory_order_acquire);
-    if (!offset) {
-        const std::uint64_t local = data->ntp_time_local ? data->ntp_time_local : get_local_time();
-        offset = local - data->ntp_time_remote;
-        context->remoteClockOffset.store(offset, std::memory_order_release);
-    }
-    data->ntp_time_remote += offset;
+    // The audio renderer re-anchors the sender timeline to the pipeline's
+    // current running time. Sharing the video's NTP offset here made audio
+    // inherit stale or underflowed offsets after a stream restart/seek.
     audio_renderer_render_buffer(data->data, &data->data_len, &data->seqnum,
                                  &data->ntp_time_remote);
+
+    audio_renderer_stats_t stats{};
+    if (audio_renderer_get_stats(&stats)) {
+        const auto previousGeneration =
+            context->audioStatsGeneration.load(std::memory_order_acquire);
+        if (stats.generation != previousGeneration) {
+            context->audioStatsGeneration.store(
+                stats.generation, std::memory_order_release);
+            context->updateDiagnostics([stats](ReceiverDiagnostics& diagnostics) {
+                diagnostics.audioAppsrcQueuedNs = stats.appsrc_queued_ns;
+                diagnostics.audioQueueQueuedNs = stats.queue_queued_ns;
+                diagnostics.audioPtsLeadNs = stats.pts_lead_ns;
+                diagnostics.audioAppsrcDropped = stats.appsrc_dropped;
+                diagnostics.audioQueueDropped = stats.queue_dropped;
+                diagnostics.audioAppsrcFailures = stats.appsrc_failures;
+                diagnostics.audioReanchors = stats.reanchors;
+                diagnostics.audioConcealedFrames = stats.concealed_frames;
+                diagnostics.audioDecoderResets = stats.decoder_resets;
+                diagnostics.audioLatencyRecoveries = stats.latency_recoveries;
+            });
+        }
+    }
 }
 
 void uxVideoProcess(void* cls, raop_ntp_t*, video_decode_struct* data) {
-    auto* context = static_cast<UxPlayReceiver::Context*>(cls);
+    auto* context = static_cast<ReceiverContext*>(cls);
     if (!context || !data || !data->data || data->data_len <= 0) {
         return;
     }
 
-    std::uint64_t offset = context->remoteClockOffset.load(std::memory_order_acquire);
+    std::uint64_t offset = context->videoClockOffset.load(std::memory_order_acquire);
     if (!offset) {
         const std::uint64_t local = data->ntp_time_local ? data->ntp_time_local : get_local_time();
         offset = local - data->ntp_time_remote;
-        context->remoteClockOffset.store(offset, std::memory_order_release);
+        context->videoClockOffset.store(offset, std::memory_order_release);
     }
 
     int attempts = 0;
     std::uint64_t mismatch = 0;
     do {
-        data->ntp_time_remote += offset;
+        std::uint64_t adjustedTimestamp = data->ntp_time_remote + offset;
         mismatch = video_renderer_render_buffer(data->data, &data->data_len,
-                                                &data->nal_count, &data->ntp_time_remote);
+                                                &data->nal_count,
+                                                &adjustedTimestamp);
         if (mismatch) {
             offset += mismatch;
-            context->remoteClockOffset.store(offset, std::memory_order_release);
+            context->videoClockOffset.store(offset, std::memory_order_release);
         }
         ++attempts;
     } while (mismatch && attempts < 10);
+
+    video_renderer_stats_t stats{};
+    if (video_renderer_get_stats(&stats)) {
+        const auto previousGeneration =
+            context->videoStatsGeneration.load(std::memory_order_acquire);
+        if (stats.generation != previousGeneration) {
+            context->videoStatsGeneration.store(
+                stats.generation,
+                std::memory_order_release);
+            context->updateDiagnostics([stats](ReceiverDiagnostics& diagnostics) {
+                diagnostics.videoInputFps = stats.input_fps;
+                diagnostics.videoSinkFps = stats.sink_fps;
+                diagnostics.videoQueueBuffers = stats.queue_buffers;
+                diagnostics.videoQueueDropped = stats.queue_dropped;
+                diagnostics.videoQosDropped = stats.qos_dropped;
+                diagnostics.videoAppsrcFailures = stats.appsrc_failures;
+                diagnostics.videoInputPtsDeltaMs = stats.input_pts_delta_ms;
+                diagnostics.videoSinkPtsDeltaMs = stats.sink_pts_delta_ms;
+                diagnostics.videoSinkPtsLeadMs = stats.sink_pts_lead_ms;
+            });
+        }
+    }
 }
 
 void uxVideoPause(void*) {
@@ -264,11 +356,17 @@ void uxVideoFlush(void*) {
     video_renderer_flush();
 }
 
-double uxInitialVolume(void*) {
+double uxInitialVolume(void* cls) {
+    auto* context = static_cast<ReceiverContext*>(cls);
+    applyAudioOutput(context);
     return 0.0;
 }
 
-void uxAudioSetVolume(void*, float volume) {
+void uxAudioSetVolume(void* cls, float volume) {
+    auto* context = static_cast<ReceiverContext*>(cls);
+    if (!context) {
+        return;
+    }
     double fraction = 0.0;
     if (volume == -144.0F || volume <= -30.0F) {
         fraction = 0.0;
@@ -277,8 +375,11 @@ void uxAudioSetVolume(void*, float volume) {
     } else {
         fraction = static_cast<double>(30.0F + volume) / 30.0;
     }
-    const double gain = fraction == 0.0 ? 0.0 : std::pow(10.0, 0.05 * (-30.0 + 30.0 * fraction));
-    audio_renderer_set_volume(gain);
+    const double clientGain = fraction == 0.0
+        ? 0.0
+        : std::pow(10.0, 0.05 * (-30.0 + 30.0 * fraction));
+    context->clientGain.store(clientGain, std::memory_order_release);
+    applyAudioOutput(context);
 }
 
 void uxAudioMetadata(void*, const void*, int) {
@@ -296,29 +397,56 @@ void uxAudioRemoteControl(void*, const char*, const char*) {
 void uxAudioProgress(void*, std::uint32_t*, std::uint32_t*, std::uint32_t*) {
 }
 
-void uxAudioGetFormat(void*, unsigned char* compressionType, unsigned short*, bool*, bool*, std::uint64_t*) {
+void uxAudioGetFormat(void* cls, unsigned char* compressionType, unsigned short*, bool*, bool*, std::uint64_t*) {
+    auto* context = static_cast<ReceiverContext*>(cls);
     if (compressionType) {
         audio_renderer_start(compressionType);
+        applyAudioOutput(context);
+        if (context) {
+            const std::string codec = audioCodecName(*compressionType);
+            context->updateDiagnostics([codec](ReceiverDiagnostics& diagnostics) {
+                diagnostics.audioCodec = codec;
+                diagnostics.audioSampleRate = 44100;
+            });
+        }
     }
 }
 
-void uxVideoReportSize(void*, float* sourceWidth, float* sourceHeight, float* width, float* height) {
+void uxVideoReportSize(void* cls, float* sourceWidth, float* sourceHeight, float* width, float* height) {
     video_renderer_size(sourceWidth, sourceHeight, width, height);
+    auto* context = static_cast<ReceiverContext*>(cls);
+    if (context && width && height) {
+        const int videoWidth = static_cast<int>(*width);
+        const int videoHeight = static_cast<int>(*height);
+        context->updateDiagnostics([videoWidth, videoHeight](ReceiverDiagnostics& diagnostics) {
+            diagnostics.videoWidth = videoWidth;
+            diagnostics.videoHeight = videoHeight;
+        });
+    }
 }
 
 void uxMirrorVideoRunning(void* cls, bool running) {
-    auto* context = static_cast<UxPlayReceiver::Context*>(cls);
+    auto* context = static_cast<ReceiverContext*>(cls);
     if (context) {
         context->publish(running ? ReceiverState::Streaming : ReceiverState::Waiting,
                          running ? "Mirroring iPad screen" : "Ready for AirPlay");
     }
 }
 
-void uxReportClient(void*, char*, char* model, char* name, bool* admit) {
+void uxReportClient(void* cls, char*, char* model, char* name, bool* admit) {
     if (admit) {
         *admit = true;
     }
     video_renderer_set_device_model(model, name);
+    auto* context = static_cast<ReceiverContext*>(cls);
+    if (context) {
+        const std::string clientModel = model ? model : "";
+        const std::string clientName = name ? name : "";
+        context->updateDiagnostics([clientModel, clientName](ReceiverDiagnostics& diagnostics) {
+            diagnostics.clientModel = clientModel;
+            diagnostics.clientName = clientName;
+        });
+    }
 }
 
 void uxDisplayPin(void*, char*) {
@@ -342,11 +470,11 @@ void uxExportDacp(void*, const char*, const char*) {
 }
 
 void uxVideoReset(void* cls, reset_type_t type) {
-    auto* context = static_cast<UxPlayReceiver::Context*>(cls);
+    auto* context = static_cast<ReceiverContext*>(cls);
     if (!context) {
         return;
     }
-    context->remoteClockOffset.store(0, std::memory_order_release);
+    context->videoClockOffset.store(0, std::memory_order_release);
     switch (type) {
     case RESET_TYPE_NOHOLD:
     case RESET_TYPE_HLS_EOS:
@@ -362,12 +490,19 @@ void uxVideoReset(void* cls, reset_type_t type) {
     }
 }
 
-int uxVideoSetCodec(void*, video_codec_t codec) {
+int uxVideoSetCodec(void* cls, video_codec_t codec) {
+    auto* context = static_cast<ReceiverContext*>(cls);
+    if (context) {
+        const std::string name = codec == VIDEO_CODEC_H265 ? "H.265" : "H.264";
+        context->updateDiagnostics([name](ReceiverDiagnostics& diagnostics) {
+            diagnostics.videoCodec = name;
+        });
+    }
     return video_renderer_choose_codec(false, codec == VIDEO_CODEC_H265);
 }
 
 void uxVideoPlay(void* cls, const char*, float) {
-    auto* context = static_cast<UxPlayReceiver::Context*>(cls);
+    auto* context = static_cast<ReceiverContext*>(cls);
     if (context) {
         context->publish(ReceiverState::Error, "HLS video is not supported");
     }
@@ -403,7 +538,7 @@ float uxPlaylistRemove(void*) {
 
 } // extern "C"
 
-raop_callbacks_t callbacksFor(UxPlayReceiver::Context* context) {
+raop_callbacks_t callbacksFor(ReceiverContext* context) {
     raop_callbacks_t callbacks{};
     callbacks.cls = context;
     callbacks.audio_process = &uxAudioProcess;
@@ -445,26 +580,34 @@ raop_callbacks_t callbacksFor(UxPlayReceiver::Context* context) {
 
 } // namespace
 
-UxPlayReceiver::UxPlayReceiver(StateCallback stateCallback)
-    : stateCallback_(std::move(stateCallback)) {
+UxPlayReceiver::UxPlayReceiver(StateCallback stateCallback,
+                               DiagnosticsCallback diagnosticsCallback)
+    : stateCallback_(std::move(stateCallback)),
+      diagnosticsCallback_(std::move(diagnosticsCallback)) {
 }
 
 UxPlayReceiver::~UxPlayReceiver() {
     stop();
 }
 
-UxPlayReceiver::StartResult UxPlayReceiver::start(const std::string& receiverName,
-                                                  std::uintptr_t windowHandle) {
+UxPlayReceiver::StartResult UxPlayReceiver::start(
+    const support::ReceiverConfig& requestedConfig,
+    std::uintptr_t windowHandle) {
     std::lock_guard lock(mutex_);
     if (running_) {
         return {true, "AirPlay receiver already running", port_};
     }
 
-    context_ = std::make_shared<Context>();
+    const auto config = support::normalizeReceiverConfig(requestedConfig);
+    context_ = std::make_shared<ReceiverContext>();
     context_->stateCallback = stateCallback_;
+    context_->diagnosticsCallback = diagnosticsCallback_;
     context_->active.store(true, std::memory_order_release);
     context_->windowHandle.store(windowHandle, std::memory_order_release);
-    context_->receiverName = receiverName.empty() ? "PadMirror" : receiverName;
+    context_->diagnostics.receiverName = config.receiverName;
+    context_->diagnostics.maxFps = config.maxFps;
+    context_->outputGain = static_cast<double>(config.volumePercent) / 100.0;
+    context_->muted = config.muted;
     context_->publish(ReceiverState::Starting, "Starting UxPlay backend");
 
     ntp_global_init();
@@ -484,8 +627,10 @@ UxPlayReceiver::StartResult UxPlayReceiver::start(const std::string& receiverNam
     logger_set_level(renderLogger, LOGGER_INFO);
 
     const bool audioSync = false;
-    const bool videoSync = true;
-    audio_renderer_init(renderLogger, "wasapi2sink low-latency=true", &audioSync, &videoSync, "");
+    const bool videoSync = false;
+    audio_renderer_init(renderLogger,
+                        "wasapi2sink low-latency=true buffer-time=40000 latency-time=10000",
+                        &audioSync, &videoSync, "");
     initializeVideoRenderer(context_.get());
     renderersReady_ = true;
 
@@ -499,7 +644,9 @@ UxPlayReceiver::StartResult UxPlayReceiver::start(const std::string& receiverNam
     raop_set_log_callback(raop, &receiverLog, nullptr);
     raop_set_log_level(raop, LOGGER_INFO);
 
-    const std::string mac = stableMac();
+    const auto hardwareAddress =
+        support::receiverHardwareAddress(machineIdentity());
+    const std::string mac = support::formatHardwareAddress(hardwareAddress);
     if (raop_init2(raop, 1, mac.c_str(), "") != 0) {
         releaseLocked();
         return {false, "raop_init2 failed", 0};
@@ -507,8 +654,8 @@ UxPlayReceiver::StartResult UxPlayReceiver::start(const std::string& receiverNam
 
     raop_set_plist(raop, "width", 3840);
     raop_set_plist(raop, "height", 2160);
-    raop_set_plist(raop, "refreshRate", 60);
-    raop_set_plist(raop, "maxFPS", 60);
+    raop_set_plist(raop, "refreshRate", config.maxFps);
+    raop_set_plist(raop, "maxFPS", config.maxFps);
     raop_set_plist(raop, "hls", 0);
 
     unsigned short port = 0;
@@ -519,12 +666,12 @@ UxPlayReceiver::StartResult UxPlayReceiver::start(const std::string& receiverNam
     raop_set_port(raop, port);
     port_ = port;
 
-    const auto hardwareAddress = parseMac(mac);
+    const auto nativeAddress = support::nativeHardwareAddress(hardwareAddress);
     int dnsError = 0;
-    auto* dnssd = dnssd_init(context_->receiverName.c_str(),
-                             static_cast<int>(context_->receiverName.size()),
-                             hardwareAddress.data(),
-                             static_cast<int>(hardwareAddress.size()),
+    auto* dnssd = dnssd_init(context_->diagnostics.receiverName.c_str(),
+                             static_cast<int>(context_->diagnostics.receiverName.size()),
+                             nativeAddress.data(),
+                             static_cast<int>(nativeAddress.size()),
                              0,
                              &dnsError);
     if (!dnssd || dnsError != 0) {
@@ -548,6 +695,9 @@ UxPlayReceiver::StartResult UxPlayReceiver::start(const std::string& receiverNam
     airplayRegistered_ = true;
 
     running_ = true;
+    context_->updateDiagnostics([this](ReceiverDiagnostics& diagnostics) {
+        diagnostics.port = port_;
+    });
     context_->publish(ReceiverState::Waiting, "Ready for AirPlay");
     return {true, "UxPlay is listening and advertised", port_};
 }
@@ -560,8 +710,21 @@ void UxPlayReceiver::setWindowHandle(std::uintptr_t windowHandle) {
     video_renderer_set_window_handle(windowHandle);
 }
 
+void UxPlayReceiver::setAudioOutput(int volumePercent, bool muted) {
+    std::lock_guard lock(mutex_);
+    if (!context_) {
+        return;
+    }
+    context_->outputGain = static_cast<double>(std::clamp(volumePercent, 0, 100)) / 100.0;
+    context_->muted = muted;
+    applyAudioOutput(context_.get());
+}
+
 void UxPlayReceiver::stop() {
     std::lock_guard lock(mutex_);
+    if (context_ && running_) {
+        context_->publish(ReceiverState::Stopping, "Stopping AirPlay receiver");
+    }
     releaseLocked();
     running_ = false;
 }

@@ -13,6 +13,7 @@
  */
 
 #include <ctype.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,6 +24,9 @@
 #endif
 
 #include "../compat.h"
+#ifdef WIN32
+#include <iphlpapi.h>
+#endif
 #include "mdnsd.h"
 
 #define MDNS_ADDR4 "224.0.0.251"
@@ -347,6 +351,88 @@ static int mdns_query_type_matches(uint16_t query_type, uint16_t record_type)
 
 static uint32_t mdns_get_default_ipv4(void)
 {
+#ifdef WIN32
+    IP_ADAPTER_ADDRESSES *adapters = NULL;
+    IP_ADAPTER_ADDRESSES *adapter;
+    ULONG flags = GAA_FLAG_INCLUDE_GATEWAYS |
+                  GAA_FLAG_SKIP_ANYCAST |
+                  GAA_FLAG_SKIP_DNS_SERVER |
+                  GAA_FLAG_SKIP_MULTICAST;
+    ULONG size = 16 * 1024;
+    ULONG result;
+    uint32_t addr = 0;
+    ULONG best_metric = ULONG_MAX;
+
+    for (int attempt = 0; attempt < 2; attempt++) {
+        adapters = malloc(size);
+        if (!adapters) {
+            return 0;
+        }
+        result = GetAdaptersAddresses(AF_INET, flags, NULL, adapters, &size);
+        if (result != ERROR_BUFFER_OVERFLOW) {
+            break;
+        }
+        free(adapters);
+        adapters = NULL;
+    }
+
+    if (result != NO_ERROR || !adapters) {
+        free(adapters);
+        return 0;
+    }
+
+    for (adapter = adapters; adapter; adapter = adapter->Next) {
+        IP_ADAPTER_UNICAST_ADDRESS *unicast;
+        IP_ADAPTER_GATEWAY_ADDRESS_LH *gateway;
+        uint32_t candidate = 0;
+        int has_ipv4_gateway = 0;
+
+        if (adapter->OperStatus != IfOperStatusUp ||
+            adapter->IfType == IF_TYPE_SOFTWARE_LOOPBACK ||
+            adapter->NoMulticast ||
+            adapter->Ipv4Enabled == 0) {
+            continue;
+        }
+
+        for (gateway = adapter->FirstGatewayAddress; gateway; gateway = gateway->Next) {
+            if (gateway->Address.lpSockaddr &&
+                gateway->Address.lpSockaddr->sa_family == AF_INET &&
+                ((struct sockaddr_in *) gateway->Address.lpSockaddr)->sin_addr.s_addr) {
+                has_ipv4_gateway = 1;
+                break;
+            }
+        }
+        if (!has_ipv4_gateway) {
+            continue;
+        }
+
+        for (unicast = adapter->FirstUnicastAddress; unicast; unicast = unicast->Next) {
+            struct sockaddr_in *sin;
+            unsigned char *bytes;
+
+            if (!unicast->Address.lpSockaddr ||
+                unicast->Address.lpSockaddr->sa_family != AF_INET) {
+                continue;
+            }
+            sin = (struct sockaddr_in *) unicast->Address.lpSockaddr;
+            bytes = (unsigned char *) &sin->sin_addr.s_addr;
+            if (!sin->sin_addr.s_addr || bytes[0] == 127 ||
+                (bytes[0] == 169 && bytes[1] == 254)) {
+                continue;
+            }
+            candidate = sin->sin_addr.s_addr;
+            break;
+        }
+
+        if (candidate && adapter->Ipv4Metric < best_metric) {
+            addr = candidate;
+            best_metric = adapter->Ipv4Metric;
+        }
+    }
+
+    free(adapters);
+    return addr;
+#else
     int fd;
     uint32_t addr = 0;
     struct sockaddr_in remote;
@@ -370,6 +456,7 @@ static uint32_t mdns_get_default_ipv4(void)
 
     CLOSESOCKET(fd);
     return addr;
+#endif
 }
 
 static int mdns_get_default_ipv6(unsigned char addr[16], unsigned int *scope_id)

@@ -1,15 +1,44 @@
-# Third-party boundaries
+# Vendored source
 
-PadMirror không chép source của các project tham chiếu vào `src/`.
+PadMirror builds the following third-party source directly into
+`PadMirror.exe`. Keep upstream copyright and license headers intact when
+updating or modifying these directories.
 
-- `ios-screen-record`: tham chiếu chính cho QuickTime-style USB protocol (chỉ parser/protocol); MIT.
-- `quicktime_video_hack`: tham chiếu giao thức phụ; không phải runtime backend.
-- `libimobiledevice`/`libusbmuxd`: metadata, trust và device discovery tùy chọn (chỉ dùng ở M2 nếu Apple runtime cho phép; không dùng để capture thô, không rebind/filter driver).
-- GStreamer: media pipeline (D3D11 decode/render, WASAPI audio).
-- Qt 6: GUI/QML.
+## `uxplay-native`
 
-## AirPlay native (gated M6/M7)
+- Upstream: <https://github.com/FDH2/UxPlay>
+- Baseline commit: `fd5192b06f0c2ab2f664b8ab778ac6f772e4d741`
+- Product integration: native in-process AirPlay/RAOP receiver; no external
+  `uxplay.exe`, localhost RTP relay, or external Bonjour dependency.
+- Local modifications include Windows/MSVC portability, bundled mDNS behavior,
+  receiver lifecycle/callback safety, D3D11 video rendering, AAC-ELD/ALAC audio,
+  timestamp/flush handling, low-latency queue policy, stable identity and
+  PadMirror callback/diagnostics integration.
+- License: the combined UxPlay-derived target is GPLv3-compatible and includes
+  GPL-3.0-or-later renderer code. Individual `lib/` files also retain
+  LGPL-2.1-or-later, GPLv3, or MIT terms as stated in their headers and license
+  files.
+- License files:
+  - `uxplay-native/LICENSE` — GNU GPL version 3 text.
+  - `uxplay-native/lib/playfair/LICENSE.md` — Playfair GNU GPL version 3 text.
+  - `uxplay-native/lib/llhttp/LICENSE-MIT` — llhttp MIT license.
 
-Receiver AirPlay chạy **trong** `PadMirror.exe`. Khi triển khai, mã có nguồn gốc UxPlay GPLv3 sẽ được vendor dưới `third_party/uxplay-native` với provenance/license được thiết lập trước, và chỉ port phần protocol/control/pairing/crypto/session cần cho screen mirroring. Không chạy `uxplay.exe` ngoài tiến trình, không relay RTP qua loopback. Hiện tại phần này **chưa** được bao gồm.
+Do not replace these sources with a separately launched UxPlay executable. When
+refreshing the baseline, re-audit protocol callbacks, mDNS publication ordering,
+GStreamer element/property availability, renderer reset behavior, and all local
+modifications before accepting the update.
 
-Xem [LICENSES/THIRD_PARTY.md](../LICENSES/THIRD_PARTY.md) trước khi phân phối binary.
+## `libplist`
+
+- Upstream: <https://github.com/libimobiledevice/libplist>
+- Scope: the dependency-free C core used by UxPlay RTSP handlers; the C++
+  wrappers and command-line tools are not built.
+- Build: compiled statically with MSVC as `padmirror_libplist`.
+- License: LGPL-2.1-or-later; see `libplist/COPYING.LESSER.txt` and source
+  headers. Embedded `jsmn` and `time64` files retain their MIT notices.
+
+## Distribution
+
+The product license and release obligations are documented in `../LICENSE` and
+`../LICENSES/THIRD_PARTY.md`. Binary distributions must provide the
+Corresponding Source for the exact vendored baseline and PadMirror changes.
