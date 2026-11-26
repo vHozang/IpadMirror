@@ -26,6 +26,7 @@
 #include "../compat.h"
 #ifdef WIN32
 #include <iphlpapi.h>
+#include <wctype.h>
 #endif
 #include "mdnsd.h"
 
@@ -63,6 +64,7 @@ struct mdnsd_s {
     mdnsd_service_t airplay;
     mdnsd_service_t raop;
 
+    uint32_t custom_ipv4_addr;
     uint32_t ipv4_addr;
     unsigned char ipv6_addr[16];
     unsigned int ipv6_scope_id;
@@ -349,6 +351,39 @@ static int mdns_query_type_matches(uint16_t query_type, uint16_t record_type)
     return query_type == record_type || query_type == DNS_TYPE_ANY;
 }
 
+#ifdef WIN32
+static int mdns_is_virtual_adapter(const IP_ADAPTER_ADDRESSES *adapter)
+{
+    static const wchar_t *keywords[] = {
+        L"radmin", L"tailscale", L"tap", L"wsl", L"hyper-v",
+        L"virtual", L"wintun", L"zerotier", L"vpn", L"vmware",
+        L"virtualbox", L"hamachi"
+    };
+    wchar_t name_buf[256] = {0};
+    wchar_t desc_buf[256] = {0};
+
+    if (adapter->FriendlyName) {
+        wcsncpy(name_buf, adapter->FriendlyName, 255);
+        for (int i = 0; name_buf[i]; i++) {
+            name_buf[i] = (wchar_t) towlower(name_buf[i]);
+        }
+    }
+    if (adapter->Description) {
+        wcsncpy(desc_buf, adapter->Description, 255);
+        for (int i = 0; desc_buf[i]; i++) {
+            desc_buf[i] = (wchar_t) towlower(desc_buf[i]);
+        }
+    }
+
+    for (size_t i = 0; i < sizeof(keywords) / sizeof(keywords[0]); i++) {
+        if (wcsstr(name_buf, keywords[i]) || wcsstr(desc_buf, keywords[i])) {
+            return 1;
+        }
+    }
+    return 0;
+}
+#endif
+
 static uint32_t mdns_get_default_ipv4(void)
 {
 #ifdef WIN32
@@ -360,8 +395,10 @@ static uint32_t mdns_get_default_ipv4(void)
                   GAA_FLAG_SKIP_MULTICAST;
     ULONG size = 16 * 1024;
     ULONG result;
-    uint32_t addr = 0;
-    ULONG best_metric = ULONG_MAX;
+    uint32_t best_phys_addr = 0;
+    ULONG best_phys_metric = ULONG_MAX;
+    uint32_t best_any_addr = 0;
+    ULONG best_any_metric = ULONG_MAX;
 
     for (int attempt = 0; attempt < 2; attempt++) {
         adapters = malloc(size);
@@ -424,14 +461,27 @@ static uint32_t mdns_get_default_ipv4(void)
             break;
         }
 
-        if (candidate && adapter->Ipv4Metric < best_metric) {
-            addr = candidate;
-            best_metric = adapter->Ipv4Metric;
+        if (candidate) {
+            int is_virtual = mdns_is_virtual_adapter(adapter);
+            if (!is_virtual) {
+                ULONG effective_metric = adapter->Ipv4Metric;
+                if (adapter->IfType == IF_TYPE_IEEE80211 && effective_metric > 10) {
+                    effective_metric -= 10;
+                }
+                if (effective_metric < best_phys_metric) {
+                    best_phys_addr = candidate;
+                    best_phys_metric = effective_metric;
+                }
+            }
+            if (adapter->Ipv4Metric < best_any_metric) {
+                best_any_addr = candidate;
+                best_any_metric = adapter->Ipv4Metric;
+            }
         }
     }
 
     free(adapters);
-    return addr;
+    return best_phys_addr ? best_phys_addr : best_any_addr;
 #else
     int fd;
     uint32_t addr = 0;
@@ -1061,6 +1111,17 @@ void mdnsd_destroy(mdnsd_t *mdnsd)
     free(mdnsd);
 }
 
+void mdnsd_set_bind_ipv4(mdnsd_t *mdnsd, uint32_t ipv4_addr)
+{
+    if (!mdnsd) {
+        return;
+    }
+
+    MUTEX_LOCK(mdnsd->mutex);
+    mdnsd->custom_ipv4_addr = ipv4_addr;
+    MUTEX_UNLOCK(mdnsd->mutex);
+}
+
 int mdnsd_start(mdnsd_t *mdnsd)
 {
     if (!mdnsd) {
@@ -1076,7 +1137,7 @@ int mdnsd_start(mdnsd_t *mdnsd)
     int error4 = 0;
     int error6 = 0;
 
-    mdnsd->ipv4_addr = mdns_get_default_ipv4();
+    mdnsd->ipv4_addr = mdnsd->custom_ipv4_addr ? mdnsd->custom_ipv4_addr : mdns_get_default_ipv4();
     mdns_get_default_ipv6(mdnsd->ipv6_addr, &mdnsd->ipv6_scope_id);
 
     mdnsd->sock_fd4 = mdns_open_socket4(mdnsd->ipv4_addr);

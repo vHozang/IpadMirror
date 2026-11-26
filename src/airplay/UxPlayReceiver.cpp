@@ -652,8 +652,8 @@ UxPlayReceiver::StartResult UxPlayReceiver::start(
         return {false, "raop_init2 failed", 0};
     }
 
-    raop_set_plist(raop, "width", 3840);
-    raop_set_plist(raop, "height", 2160);
+    raop_set_plist(raop, "width", support::qualityWidth(config.qualityProfile));
+    raop_set_plist(raop, "height", support::qualityHeight(config.qualityProfile));
     raop_set_plist(raop, "refreshRate", config.maxFps);
     raop_set_plist(raop, "maxFPS", config.maxFps);
     raop_set_plist(raop, "hls", 0);
@@ -679,6 +679,9 @@ UxPlayReceiver::StartResult UxPlayReceiver::start(
         return {false, "mDNS initialization failed", 0};
     }
     dnssd_ = dnssd;
+    if (!config.bindAddress.empty()) {
+        dnssd_set_bind_address(dnssd, config.bindAddress.c_str());
+    }
     configureFeatures(dnssd);
     raop_set_dnssd(raop, dnssd);
 

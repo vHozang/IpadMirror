@@ -236,6 +236,26 @@ dnssd_private_destroy(void *private)
     }
 }
 
+void
+dnssd_set_bind_address(dnssd_t *dnssd_public, const char *ip_address)
+{
+    if (!dnssd_public || !dnssd_public->dnssd_private) {
+        return;
+    }
+    dnssd_private_t *dnssd = (dnssd_private_t *) dnssd_public->dnssd_private;
+    if (!dnssd->mdnsd) {
+        return;
+    }
+    uint32_t addr = 0;
+    if (ip_address && *ip_address) {
+        struct in_addr in;
+        if (inet_pton(AF_INET, ip_address, &in) == 1) {
+            addr = in.s_addr;
+        }
+    }
+    mdnsd_set_bind_ipv4(dnssd->mdnsd, addr);
+}
+
 int
 dnssd_register_raop(dnssd_t *dnssd_public, unsigned short port)
 {

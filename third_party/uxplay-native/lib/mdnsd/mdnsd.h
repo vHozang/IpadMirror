@@ -40,6 +40,7 @@ int mdnsd_txt_add(mdnsd_txt_t *txt, const char *key, const char *value);
 
 mdnsd_t *mdnsd_init(const char *host_name);
 void mdnsd_destroy(mdnsd_t *mdnsd);
+void mdnsd_set_bind_ipv4(mdnsd_t *mdnsd, uint32_t ipv4_addr);
 
 int mdnsd_start(mdnsd_t *mdnsd);
 void mdnsd_stop(mdnsd_t *mdnsd);
