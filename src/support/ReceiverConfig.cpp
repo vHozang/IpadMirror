@@ -59,11 +59,58 @@ std::string sanitizeReceiverName(const std::string& value) {
     return result.empty() ? "PadMirror" : result;
 }
 
+std::string sanitizeBindAddress(const std::string& value) {
+    auto start = value.find_first_not_of(" \t\r\n");
+    if (start == std::string::npos) {
+        return "";
+    }
+    auto end = value.find_last_not_of(" \t\r\n");
+    std::string trimmed = value.substr(start, end - start + 1);
+    if (trimmed == "auto" || trimmed == "Auto" || trimmed == "AUTO") {
+        return "";
+    }
+
+    int parts[4]{};
+    int count = 0;
+    std::size_t pos = 0;
+    while (pos < trimmed.size() && count < 4) {
+        if (count > 0) {
+            if (trimmed[pos] != '.') {
+                return "";
+            }
+            ++pos;
+        }
+        if (pos >= trimmed.size() || !std::isdigit(static_cast<unsigned char>(trimmed[pos]))) {
+            return "";
+        }
+        int num = 0;
+        int digits = 0;
+        while (pos < trimmed.size() && std::isdigit(static_cast<unsigned char>(trimmed[pos]))) {
+            num = num * 10 + (trimmed[pos] - '0');
+            ++digits;
+            ++pos;
+            if (num > 255 || digits > 3) {
+                return "";
+            }
+        }
+        parts[count++] = num;
+    }
+    if (count != 4 || pos != trimmed.size()) {
+        return "";
+    }
+    return trimmed;
+}
+
 ReceiverConfig normalizeReceiverConfig(ReceiverConfig config) {
     config.receiverName = sanitizeReceiverName(config.receiverName);
+    config.bindAddress = sanitizeBindAddress(config.bindAddress);
     // V1 has one supported capture cadence. Keeping this fixed at 60 also
     // upgrades settings written by earlier builds that allowed a 30 FPS cap.
     config.maxFps = 60;
+    const auto qualityProfile = static_cast<int>(config.qualityProfile);
+    if (qualityProfile < 0 || qualityProfile > 2) {
+        config.qualityProfile = QualityProfile::FHD_1080;
+    }
     config.volumePercent = std::clamp(config.volumePercent, 0, 100);
     return config;
 }
@@ -73,6 +120,8 @@ bool receiverRestartRequired(const ReceiverConfig& before,
     const auto normalizedBefore = normalizeReceiverConfig(before);
     const auto normalizedAfter = normalizeReceiverConfig(after);
     return normalizedBefore.receiverName != normalizedAfter.receiverName ||
+           normalizedBefore.qualityProfile != normalizedAfter.qualityProfile ||
+           normalizedBefore.bindAddress != normalizedAfter.bindAddress ||
            normalizedBefore.maxFps != normalizedAfter.maxFps;
 }
 
