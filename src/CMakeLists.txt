@@ -51,7 +51,7 @@ target_link_libraries(padmirror_app_support PUBLIC
     PkgConfig::GSTREAMER
 )
 if(WIN32)
-    target_link_libraries(padmirror_app_support PUBLIC user32 shell32)
+    target_link_libraries(padmirror_app_support PUBLIC user32 shell32 iphlpapi)
 endif()
 if(MSVC)
     target_compile_options(padmirror_app_support PRIVATE /W4 /permissive- /EHsc)

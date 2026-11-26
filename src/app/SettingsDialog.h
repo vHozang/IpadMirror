@@ -24,6 +24,8 @@ private:
 
     ApplicationSettings* settings_ = nullptr;
     QLineEdit* receiverName_ = nullptr;
+    QComboBox* networkInterface_ = nullptr;
+    QComboBox* qualityProfile_ = nullptr;
     QComboBox* maxFps_ = nullptr;
     QSlider* volume_ = nullptr;
     QLabel* volumeValue_ = nullptr;

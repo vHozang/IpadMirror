@@ -9,7 +9,78 @@
 #include <QSlider>
 #include <QVBoxLayout>
 
+#if defined(_WIN32)
+#include <winsock2.h>
+#include <iphlpapi.h>
+#include <ws2tcpip.h>
+#endif
+#include <cstdlib>
+#include <vector>
+
 namespace padmirror::app {
+namespace {
+
+struct AdapterEntry {
+    QString name;
+    QString ip;
+};
+
+std::vector<AdapterEntry> queryAvailableAdapters() {
+    std::vector<AdapterEntry> result;
+#if defined(_WIN32)
+    ULONG size = 16 * 1024;
+    IP_ADAPTER_ADDRESSES* adapters = nullptr;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        adapters = static_cast<IP_ADAPTER_ADDRESSES*>(std::malloc(size));
+        if (!adapters) {
+            return result;
+        }
+        ULONG status = GetAdaptersAddresses(
+            AF_INET,
+            GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_DNS_SERVER | GAA_FLAG_SKIP_MULTICAST,
+            nullptr, adapters, &size);
+        if (status != ERROR_BUFFER_OVERFLOW) {
+            break;
+        }
+        std::free(adapters);
+        adapters = nullptr;
+    }
+    if (!adapters) {
+        return result;
+    }
+
+    for (auto* it = adapters; it; it = it->Next) {
+        if (it->OperStatus != IfOperStatusUp ||
+            it->IfType == IF_TYPE_SOFTWARE_LOOPBACK ||
+            !it->Ipv4Enabled) {
+            continue;
+        }
+        for (auto* unicast = it->FirstUnicastAddress; unicast; unicast = unicast->Next) {
+            if (!unicast->Address.lpSockaddr ||
+                unicast->Address.lpSockaddr->sa_family != AF_INET) {
+                continue;
+            }
+            auto* sin = reinterpret_cast<sockaddr_in*>(unicast->Address.lpSockaddr);
+            char ipBuf[INET_ADDRSTRLEN]{};
+            if (inet_ntop(AF_INET, &sin->sin_addr, ipBuf, sizeof(ipBuf))) {
+                QString ipStr = QString::fromLatin1(ipBuf);
+                if (ipStr.startsWith(QStringLiteral("127.")) ||
+                    ipStr.startsWith(QStringLiteral("169.254."))) {
+                    continue;
+                }
+                QString friendly = it->FriendlyName
+                    ? QString::fromWCharArray(it->FriendlyName)
+                    : QString::fromLatin1(it->AdapterName);
+                result.push_back({friendly, ipStr});
+            }
+        }
+    }
+    std::free(adapters);
+#endif
+    return result;
+}
+
+} // namespace
 
 SettingsDialog::SettingsDialog(ApplicationSettings* settings, QWidget* parent)
     : QDialog(parent),
@@ -28,6 +99,33 @@ SettingsDialog::SettingsDialog(ApplicationSettings* settings, QWidget* parent)
         this);
     receiverName_->setMaxLength(63);
     form->addRow(QStringLiteral("Receiver name"), receiverName_);
+
+    networkInterface_ = new QComboBox(this);
+    networkInterface_->addItem(QStringLiteral("Auto (Khuyên dùng / Recommended)"), QString());
+    const auto adapters = queryAvailableAdapters();
+    for (const auto& adapter : adapters) {
+        const QString label = QStringLiteral("%1 (%2)").arg(adapter.name, adapter.ip);
+        networkInterface_->addItem(label, adapter.ip);
+    }
+    const QString currentBind = QString::fromStdString(config.bindAddress);
+    int selectedIdx = networkInterface_->findData(currentBind);
+    if (selectedIdx >= 0) {
+        networkInterface_->setCurrentIndex(selectedIdx);
+    } else {
+        networkInterface_->setCurrentIndex(0);
+    }
+    form->addRow(QStringLiteral("Network adapter"), networkInterface_);
+
+    qualityProfile_ = new QComboBox(this);
+    qualityProfile_->addItem(QStringLiteral("720p (1280×720)"),
+                             static_cast<int>(support::QualityProfile::HD_720));
+    qualityProfile_->addItem(QStringLiteral("1080p (1920×1080)"),
+                             static_cast<int>(support::QualityProfile::FHD_1080));
+    qualityProfile_->addItem(QStringLiteral("1440p (2560×1440)"),
+                             static_cast<int>(support::QualityProfile::QHD_1440));
+    qualityProfile_->setCurrentIndex(
+        qualityProfile_->findData(static_cast<int>(config.qualityProfile)));
+    form->addRow(QStringLiteral("Quality"), qualityProfile_);
 
     maxFps_ = new QComboBox(this);
     maxFps_->addItem(QStringLiteral("60 FPS"), 60);
@@ -79,6 +177,9 @@ SettingsDialog::SettingsDialog(ApplicationSettings* settings, QWidget* parent)
 void SettingsDialog::accept() {
     auto config = settings_->config();
     config.receiverName = receiverName_->text().toUtf8().toStdString();
+    config.bindAddress = networkInterface_->currentData().toString().toUtf8().toStdString();
+    config.qualityProfile = static_cast<support::QualityProfile>(
+        qualityProfile_->currentData().toInt());
     config.maxFps = maxFps_->currentData().toInt();
     config.volumePercent = volume_->value();
     config.muted = muted_->isChecked();
