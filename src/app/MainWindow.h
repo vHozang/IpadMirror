@@ -11,7 +11,9 @@ class QEvent;
 class QKeyEvent;
 class QLabel;
 class QMouseEvent;
+class QMenu;
 class QShowEvent;
+class QSystemTrayIcon;
 class QTimer;
 class QToolBar;
 
@@ -39,6 +41,8 @@ private:
     void applyReceiverState(airplay::ReceiverState state, const QString& detail);
     void showSettings();
     void showDiagnostics();
+    void setupSystemTray();
+    void quitApplication();
     void toggleFullscreen();
     void setControlsVisible(bool visible);
 
@@ -52,6 +56,8 @@ private:
     QToolBar* toolbar_ = nullptr;
     QTimer* controlsHideTimer_ = nullptr;
     QAction* receiverAction_ = nullptr;
+    QSystemTrayIcon* trayIcon_ = nullptr;
+    QMenu* trayMenu_ = nullptr;
 };
 
 } // namespace padmirror::app

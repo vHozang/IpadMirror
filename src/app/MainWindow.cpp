@@ -3,6 +3,7 @@
 #include "app/DiagnosticsDialog.h"
 #include "app/SettingsDialog.h"
 
+#include <QApplication>
 #include <QAction>
 #include <QCloseEvent>
 #include <QEvent>
@@ -11,9 +12,11 @@
 #include <QIcon>
 #include <QKeyEvent>
 #include <QLabel>
+#include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QShowEvent>
+#include <QSystemTrayIcon>
 #include <QStackedLayout>
 #include <QTimer>
 #include <QToolBar>
@@ -69,7 +72,11 @@ MainWindow::MainWindow(ApplicationSettings* settings,
     setMouseTracking(true);
     setStyleSheet(QStringLiteral("background: #050708;"));
 
-    auto* stack = new QStackedLayout(this);
+    auto* mainLayout = new QVBoxLayout(this);
+    mainLayout->setContentsMargins(0, 0, 0, 0);
+    mainLayout->setSpacing(0);
+
+    auto* stack = new QStackedLayout;
     stack->setContentsMargins(0, 0, 0, 0);
     stack->setStackingMode(QStackedLayout::StackAll);
 
@@ -166,8 +173,8 @@ MainWindow::MainWindow(ApplicationSettings* settings,
     connect(diagnosticsAction, &QAction::triggered, this, &MainWindow::showDiagnostics);
     auto* fullscreenAction = toolbar_->addAction(QStringLiteral("Fullscreen  F11"));
     connect(fullscreenAction, &QAction::triggered, this, &MainWindow::toggleFullscreen);
-    stack->addWidget(toolbar_);
-    stack->setAlignment(toolbar_, Qt::AlignTop);
+    mainLayout->addWidget(toolbar_);
+    mainLayout->addLayout(stack);
 
     controlsHideTimer_ = new QTimer(this);
     controlsHideTimer_->setSingleShot(true);
@@ -177,6 +184,8 @@ MainWindow::MainWindow(ApplicationSettings* settings,
             setControlsVisible(false);
         }
     });
+
+    setupSystemTray();
 
     connect(controller_, &AirPlayController::stateChanged,
             this, &MainWindow::applyReceiverState);
@@ -204,6 +213,11 @@ void MainWindow::showEvent(QShowEvent* event) {
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
+    if (trayIcon_ && trayIcon_->isVisible()) {
+        hide();
+        event->ignore();
+        return;
+    }
     controller_->stop();
     QWidget::closeEvent(event);
 }
@@ -271,6 +285,42 @@ void MainWindow::applyReceiverState(airplay::ReceiverState state,
         settings_->config().fullscreenOnConnect && !isFullScreen()) {
         showFullScreen();
     }
+}
+
+void MainWindow::setupSystemTray() {
+    trayIcon_ = new QSystemTrayIcon(QIcon(QStringLiteral(":/assets/icons/PadMirror-256.png")), this);
+    trayIcon_->setToolTip(QStringLiteral("PadMirror"));
+
+    trayMenu_ = new QMenu(this);
+    auto* showAction = trayMenu_->addAction(QStringLiteral("Show"));
+    connect(showAction, &QAction::triggered, this, [this] {
+        show();
+        raise();
+        activateWindow();
+    });
+    auto* settingsAction = trayMenu_->addAction(QStringLiteral("Settings"));
+    connect(settingsAction, &QAction::triggered, this, &MainWindow::showSettings);
+    trayMenu_->addSeparator();
+    auto* quitAction = trayMenu_->addAction(QStringLiteral("Quit"));
+    connect(quitAction, &QAction::triggered, this, &MainWindow::quitApplication);
+
+    trayIcon_->setContextMenu(trayMenu_);
+
+    connect(trayIcon_, &QSystemTrayIcon::activated, this, [this](QSystemTrayIcon::ActivationReason reason) {
+        if (reason == QSystemTrayIcon::DoubleClick) {
+            show();
+            raise();
+            activateWindow();
+        }
+    });
+
+    trayIcon_->show();
+}
+
+void MainWindow::quitApplication() {
+    controller_->stop();
+    trayIcon_->hide();
+    QApplication::quit();
 }
 
 void MainWindow::showSettings() {
