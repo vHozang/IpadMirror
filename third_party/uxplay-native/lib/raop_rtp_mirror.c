@@ -254,6 +254,13 @@ raop_rtp_mirror_thread(void *arg)
                 break;
             }
 
+            int nodelay = 1;
+            if (setsockopt(stream_fd, IPPROTO_TCP, TCP_NODELAY, CAST &nodelay, sizeof(nodelay)) < 0) {
+                int sock_err = SOCKET_GET_ERROR();
+                logger_log(raop_rtp_mirror->logger, LOGGER_WARNING,
+                           "raop_rtp_mirror could not set TCP_NODELAY: %d %s", sock_err, SOCKET_ERROR_STRING(sock_err));
+            }
+
             // We're calling recv for a certain amount of data, so we need a timeout
             struct timeval tv;
             tv.tv_sec = 0;

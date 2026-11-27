@@ -304,6 +304,9 @@ httpd_accept_connection(httpd_t *httpd, int server_fd, int is_ipv6)
         return -1;
     }
 
+    int nodelay = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (const char *) &nodelay, sizeof(nodelay));
+
     local_saddrlen = sizeof(local_saddr);
     ret = getsockname(fd, (struct sockaddr *)&local_saddr, &local_saddrlen);
     if (ret == -1) {

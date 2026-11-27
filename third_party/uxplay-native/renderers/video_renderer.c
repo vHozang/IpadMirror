@@ -646,7 +646,7 @@ void video_renderer_init(logger_t *render_logger, const char *server_name, video
                 g_string_append(launch, converter);
                 g_string_append(launch, " name=video_converter ! ");
                 if (!jpeg_pipeline) {
-                    g_string_append(launch, "queue name=video_live_queue max-size-buffers=3 max-size-bytes=0 max-size-time=0 leaky=downstream ! ");
+                    g_string_append(launch, "queue name=video_live_queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream ! ");
                 }
                 if (jpeg_pipeline) {
                     g_string_append(launch, " imagefreeze allow-replace=TRUE ! textoverlay name=metadata_overlay ! ");
