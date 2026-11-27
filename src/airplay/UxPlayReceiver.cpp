@@ -21,6 +21,7 @@ extern "C" {
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -50,6 +51,7 @@ struct ReceiverContext {
     std::atomic<bool> muted{false};
     std::atomic<std::uint64_t> videoStatsGeneration{0};
     std::atomic<std::uint64_t> audioStatsGeneration{0};
+    std::atomic<std::int64_t> lastDiagnosticsDispatchMs{0};
 
     void publish(ReceiverState state, std::string detail) {
         if (!active.load(std::memory_order_acquire)) {
@@ -62,6 +64,9 @@ struct ReceiverContext {
             diagnostics.detail = detail;
             snapshot = diagnostics;
         }
+        const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        lastDiagnosticsDispatchMs.store(now, std::memory_order_release);
         if (stateCallback) {
             stateCallback(state, detail);
         }
@@ -81,8 +86,14 @@ struct ReceiverContext {
             update(diagnostics);
             snapshot = diagnostics;
         }
-        if (diagnosticsCallback) {
-            diagnosticsCallback(snapshot);
+        const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        const auto last = lastDiagnosticsDispatchMs.load(std::memory_order_relaxed);
+        if (now - last >= 250) {
+            lastDiagnosticsDispatchMs.store(now, std::memory_order_release);
+            if (diagnosticsCallback) {
+                diagnosticsCallback(snapshot);
+            }
         }
     }
 };
